@@ -14,12 +14,19 @@ const {
 
 const stripe = new Stripe(STRIPE_API_KEY, { apiVersion: '2024-06-20' });
 
-// 1) Your 4 Payment Link IDs - fill these
+
+
 const PAYMENT_LINK = {
-  SINGLE_LANGUAGE: 'plink_1RoKYZBFbQoDa6p0hCPS3d2g', // your single language Payment Link
-  POLYGLOT_STEAM: 'plink_1RoLRRBFbQoDa6p0g9zXIJaM',  // your Polyglot Steam
-  POLYGLOT_ITCH_A: 'plink_1RoNLzBFbQoDa6p0lvW7lw5f', // Polyglot Itch #1
-  POLYGLOT_ITCH_B: 'plink_1RoN4QBFbQoDa6p0fQ8Xc3Vs'  // Polyglot Itch #2
+  SINGLE_LANGUAGE: [
+    'plink_1RoKYZBFbQoDa6p0hCPS3d2g', 'plink_1Rzg6lBFbQoDa6p0bmGphygN'
+  ],
+  POLYGLOT_STEAM: [
+    'plink_1RoLRRBFbQoDa6p0g9zXIJaM', 'plink_1Rzg0NBFbQoDa6p0fL5aVAsU'
+  ],
+  POLYGLOT_ITCH: [
+    'plink_1RoNLzBFbQoDa6p0lvW7lw5f', 'plink_1RoN4QBFbQoDa6p0fQ8Xc3Vs',
+    'plink_1Rzg7fBFbQoDa6p0UCIOzCtk'
+  ]
 };
 
 // 2) Map language custom field to a product key
@@ -52,25 +59,21 @@ const SHEET_TAB_BY_PRODUCT = {
   [PRODUCT.POLY_ITCH]: 'Polyglot Itch'
 };
 
+const inSet = (arr, id) => Array.isArray(arr) && arr.includes(id);
+
 function productFromSession(session) {
   const pl = session.payment_link;
 
-  if (pl === PAYMENT_LINK.SINGLE_LANGUAGE) {
+  if (inSet(PAYMENT_LINK.SINGLE_LANGUAGE, pl)) {
     const fields = Array.isArray(session.custom_fields) ? session.custom_fields : [];
     const langField = fields.find(f => f.key === 'language');
     const val = langField && (langField.text?.value || langField.dropdown?.value);
-    const product = val && LANGUAGE_TO_PRODUCT[String(val).trim()];
-    return product || PRODUCT.FR; // safe fallback
+    return (val && LANGUAGE_TO_PRODUCT[String(val).trim()]) || PRODUCT.FR;
   }
-
-  if (pl === PAYMENT_LINK.POLYGLOT_STEAM) return PRODUCT.POLY_STEAM;
-  if (pl === PAYMENT_LINK.POLYGLOT_ITCH_A) return PRODUCT.POLY_ITCH;
-  if (pl === PAYMENT_LINK.POLYGLOT_ITCH_B) return PRODUCT.POLY_ITCH;
-
-  // Default if you add new links later
+  if (inSet(PAYMENT_LINK.POLYGLOT_STEAM, pl)) return PRODUCT.POLY_STEAM;
+  if (inSet(PAYMENT_LINK.POLYGLOT_ITCH, pl)) return PRODUCT.POLY_ITCH;
   return PRODUCT.POLY_STEAM;
 }
-
 async function getSheets() {
   const jwt = new google.auth.JWT(
     GOOGLE_SA_EMAIL,
@@ -239,3 +242,4 @@ exports.handler = async (event) => {
  await upsertMailerLite({ email, product, key });
   return { statusCode: 200, body: 'OK' };
 };
+
