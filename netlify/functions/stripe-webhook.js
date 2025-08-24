@@ -192,21 +192,32 @@ async function upsertMailerLite({ email, product, key }) {
   return false;
 }
 
-
 exports.handler = async (event) => {
   if (event.httpMethod !== 'POST') {
     return { statusCode: 405, body: 'Method Not Allowed' };
   }
 
-  const buf = event.isBase64Encoded
-    ? Buffer.from(event.body || '', 'base64')
-    : Buffer.from(event.body || '', 'utf8');
+  const sig =
+    event.headers['stripe-signature'] ||
+    event.headers['Stripe-Signature'] ||
+    event.headers['STRIPE-SIGNATURE'];
 
-  const sig = event.headers['stripe-signature'];
+  // Temporary debug (safe): shows presence/length, not secrets
+  console.log('dbg sig header present:', !!sig, 'len:', sig ? sig.length : 0);
+  console.log('dbg isBase64Encoded:', !!event.isBase64Encoded);
+  console.log('dbg body prefix:', (event.body || '').slice(0, 60));
+  console.log('dbg whsec prefix:', (process.env.STRIPE_WEBHOOK_SECRET || '').slice(0, 7));
+
   let stripeEvent;
   try {
-    stripeEvent = stripe.webhooks.constructEvent(buf, sig, STRIPE_WEBHOOK_SECRET);
+    // IMPORTANT: pass the raw string body to Stripe
+    stripeEvent = stripe.webhooks.constructEvent(
+      event.body,
+      sig,
+      STRIPE_WEBHOOK_SECRET
+    );
   } catch (err) {
+    console.error('Stripe signature error:', err.message);
     return { statusCode: 400, body: `Webhook signature verification failed: ${err.message}` };
   }
 
@@ -242,4 +253,5 @@ exports.handler = async (event) => {
  await upsertMailerLite({ email, product, key });
   return { statusCode: 200, body: 'OK' };
 };
+
 
