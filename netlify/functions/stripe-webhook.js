@@ -68,17 +68,50 @@ const SHEET_TAB_BY_PRODUCT = {
 
 const inSet = (arr, id) => Array.isArray(arr) && arr.includes(id);
 
-// --- Decide product from session (add logs)
+// Optional override: if you *know* the key name, set it in Netlify as LANGUAGE_FIELD_KEY.
+// If not set, we’ll fall back to the first custom field.
+const LANGUAGE_FIELD_KEY = (process.env.LANGUAGE_FIELD_KEY || 'language').toLowerCase();
+
 function productFromSession(session) {
   const pl = session.payment_link;
   const cfs = Array.isArray(session.custom_fields) ? session.custom_fields : [];
-  const langField = cfs.find(f => f.key === 'language');
-  const langVal = langField && (langField.text?.value || langField.dropdown?.value);
+
+  // Log exactly what Stripe sent so you can see the real key/value
+  console.log('custom_fields raw', JSON.stringify(cfs));
+
+  // helper to extract a value from a custom field object (text or dropdown)
+  const valueOf = (f) =>
+    (f?.text && f.text.value) ||
+    (f?.dropdown && f.dropdown.value) ||
+    null;
+
+  // try to find the field by key (case-insensitive), or fall back to the first field
+  const langField =
+    cfs.find(f => String(f.key || '').toLowerCase() === LANGUAGE_FIELD_KEY) ||
+    cfs[0] || null;
+
+  const rawVal = valueOf(langField);
+  const val = rawVal ? String(rawVal).trim() : null;
+
+  // map case-insensitively too, just in case
+  const LANG_TO_PRODUCT_LC = {
+    french: PRODUCT.FR, spanish: PRODUCT.ES, german: PRODUCT.DE,
+    portuguese: PRODUCT.PT, italian: PRODUCT.IT, korean: PRODUCT.KO, japanese: PRODUCT.JA
+  };
+  const mapped =
+    (val && LANGUAGE_TO_PRODUCT[val]) ||
+    (val && LANG_TO_PRODUCT_LC[val.toLowerCase()]) ||
+    null;
 
   if (inSet(PAYMENT_LINK.SINGLE_LANGUAGE, pl)) {
-    const mapped = langVal && LANGUAGE_TO_PRODUCT[String(langVal).trim()];
-    console.log('route: SINGLE_LANGUAGE', { payment_link: pl, language: langVal, mapped });
-    return mapped || PRODUCT.FR;
+    console.log('route: SINGLE_LANGUAGE', {
+      payment_link: pl,
+      chosenLabel: langField?.label || null,    // what buyer saw
+      keyUsed: langField?.key || null,          // the internal key Stripe set
+      chosenValue: val,
+      mapped
+    });
+    return mapped || PRODUCT.FR; // safe fallback
   }
   if (inSet(PAYMENT_LINK.POLYGLOT_STEAM, pl)) {
     console.log('route: POLYGLOT_STEAM', { payment_link: pl });
@@ -88,7 +121,8 @@ function productFromSession(session) {
     console.log('route: POLYGLOT_ITCH', { payment_link: pl });
     return PRODUCT.POLY_ITCH;
   }
-  console.log('route: DEFAULT (no match for payment_link)', { payment_link: pl });
+
+  console.log('route: DEFAULT (no payment_link match)', { payment_link: pl });
   return PRODUCT.POLY_STEAM;
 }
 
@@ -316,3 +350,4 @@ exports.handler = async (event) => {
   console.log('ok: fulfillment complete');
   return { statusCode: 200, body: 'OK' };
 };
+
