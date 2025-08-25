@@ -24,7 +24,7 @@ const {
   TIKTOK_API_KEY,           // Access Token (alias supported below)
   TIKTOK_ACCESS_TOKEN,
   TIKTOK_PIXEL,             // Pixel ID
-  TIKTOK_TEST_EVENT_CODE,   // optional: use for testing
+  TIKTOK_TEST_EVENT_CODE,   // optional for Test Events
   LANGUAGE_FIELD_KEY        // optional: Stripe custom field "key" for language
 } = process.env;
 
@@ -50,10 +50,12 @@ const PRODUCT = {
   POLY_STEAM: 'POLY_STEAM',
   POLY_ITCH: 'POLY_ITCH'
 };
+
 const LANGUAGE_TO_PRODUCT = {
   French: PRODUCT.FR, Spanish: PRODUCT.ES, German: PRODUCT.DE, Portuguese: PRODUCT.PT,
   Italian: PRODUCT.IT, Korean: PRODUCT.KO, Japanese: PRODUCT.JA
 };
+
 const SHEET_TAB_BY_PRODUCT = {
   [PRODUCT.FR]: 'French Steam',
   [PRODUCT.ES]: 'Spanish Steam',
@@ -296,48 +298,56 @@ async function sendTikTokEvent({ session, email, product, ip, url, phone, ttclid
   const price = unitPrice ?? value;
   const contentNameFinal = contentName || liName || product;
 
-  // TikTok Purchase payload
-  const body = {
+  // TikTok requires a top-level "data" array with events
+  const eventObj = {
     event: 'Purchase',
     event_id: session.id,
-    event_time: new Date().toISOString(),
-    event_source: 'web',
-    event_source_id: TIKTOK_PIXEL,
+    event_time: Math.floor(Date.now() / 1000), // seconds
     user: {
       email: sha256Lower(email),
       phone: phone ? sha256Lower(phone) : undefined,
       external_id: session.customer ? sha256Lower(session.customer) : undefined,
       ip: ip || undefined,
-      user_agent: undefined, // not available from Stripe webhook
+      // user_agent: undefined (not available from Stripe webhook)
       ttclid: ttclid || undefined,
       ttp: ttp || undefined
     },
     properties: {
       value,
       currency,
-      // one product per purchase for your flow
+      // include both a concise set of props and the contents array
+      content_id: product,
+      content_type: 'product',
+      content_name: contentNameFinal,
+      price,
+      url: url || undefined,
       contents: [{
         content_id: product,
         content_type: 'product',
         content_name: contentNameFinal,
         price,
         quantity: 1
-      }],
-      url: url || undefined
-    },
+      }]
+    }
+  };
+
+  const body = {
+    event_source: 'web',
+    event_source_id: TIKTOK_PIXEL,
+    data: [eventObj],
     test_event_code: TIKTOK_TEST_EVENT_CODE || undefined
   };
 
   console.log('tiktok: sending', {
-    event: body.event,
-    event_id: body.event_id,
-    value: body.properties.value,
-    currency: body.properties.currency,
-    price: body.properties.contents?.[0]?.price,
-    url: body.properties.url,
-    has_ip: !!body.user.ip,
-    has_ttclid: !!body.user.ttclid,
-    has_ttp: !!body.user.ttp
+    event: eventObj.event,
+    event_id: eventObj.event_id,
+    value: eventObj.properties.value,
+    currency: eventObj.properties.currency,
+    price: eventObj.properties.price,
+    url: eventObj.properties.url,
+    has_ip: !!eventObj.user.ip,
+    has_ttclid: !!eventObj.user.ttclid,
+    has_ttp: !!eventObj.user.ttp
   });
 
   const res = await fetch(TIKTOK_ENDPOINT, {
@@ -461,7 +471,7 @@ exports.handler = async (event) => {
       phone,
       ttclid,
       ttp,
-      contentName: sheetTab // nice name e.g. "French Steam"
+      contentName: sheetTab // e.g. "French Steam"
     });
   } catch (err) {
     console.error('tiktok error:', err.message);
