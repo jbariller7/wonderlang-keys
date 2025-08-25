@@ -1,9 +1,11 @@
 // netlify/functions/stripe-webhook.js
 const Stripe = require('stripe');
 const { google } = require('googleapis');
+const crypto = require('crypto');
 
-// --- ENV (from Netlify > Site configuration > Environment variables)
+// --- ENV
 const {
+  // Stripe + Google
   STRIPE_API_KEY,
   STRIPE_WEBHOOK_SECRET,
   GOOGLE_SHEETS_ID,
@@ -12,11 +14,18 @@ const {
 
   // MailerLite
   MAILERLITE_API_KEY,
-  ML_FIELD_STEAM_KEY, // e.g. steam_key
-  ML_FIELD_ITCH_KEY,  // e.g. itch_key
+  ML_FIELD_STEAM_KEY,
+  ML_FIELD_ITCH_KEY,
   ML_GROUPS_ALL,
   ML_GROUPS_FR, ML_GROUPS_ES, ML_GROUPS_DE, ML_GROUPS_PT, ML_GROUPS_IT, ML_GROUPS_KO, ML_GROUPS_JA,
-  ML_GROUPS_POLY_STEAM, ML_GROUPS_POLY_ITCH
+  ML_GROUPS_POLY_STEAM, ML_GROUPS_POLY_ITCH,
+
+  // TikTok
+  TIKTOK_API_KEY,           // Access Token (alias supported below)
+  TIKTOK_ACCESS_TOKEN,
+  TIKTOK_PIXEL,             // Pixel ID
+  TIKTOK_TEST_EVENT_CODE,   // optional: use for testing
+  LANGUAGE_FIELD_KEY        // optional: Stripe custom field "key" for language
 } = process.env;
 
 const stripe = new Stripe(STRIPE_API_KEY, { apiVersion: '2024-06-20' });
@@ -41,19 +50,10 @@ const PRODUCT = {
   POLY_STEAM: 'POLY_STEAM',
   POLY_ITCH: 'POLY_ITCH'
 };
-
-// --- Map the Stripe custom field value -> product code above
 const LANGUAGE_TO_PRODUCT = {
-  French: PRODUCT.FR,
-  Spanish: PRODUCT.ES,
-  German: PRODUCT.DE,
-  Portuguese: PRODUCT.PT,
-  Italian: PRODUCT.IT,
-  Korean: PRODUCT.KO,
-  Japanese: PRODUCT.JA
+  French: PRODUCT.FR, Spanish: PRODUCT.ES, German: PRODUCT.DE, Portuguese: PRODUCT.PT,
+  Italian: PRODUCT.IT, Korean: PRODUCT.KO, Japanese: PRODUCT.JA
 };
-
-// --- Sheet tab names per product
 const SHEET_TAB_BY_PRODUCT = {
   [PRODUCT.FR]: 'French Steam',
   [PRODUCT.ES]: 'Spanish Steam',
@@ -67,33 +67,19 @@ const SHEET_TAB_BY_PRODUCT = {
 };
 
 const inSet = (arr, id) => Array.isArray(arr) && arr.includes(id);
+const LANGUAGE_FIELD_KEY_LC = (LANGUAGE_FIELD_KEY || 'language').toLowerCase();
 
-// Optional override: if you *know* the key name, set it in Netlify as LANGUAGE_FIELD_KEY.
-// If not set, we’ll fall back to the first custom field.
-const LANGUAGE_FIELD_KEY = (process.env.LANGUAGE_FIELD_KEY || 'language').toLowerCase();
-
+// ---- Decide product from session (reads your custom field even if label != key)
 function productFromSession(session) {
   const pl = session.payment_link;
   const cfs = Array.isArray(session.custom_fields) ? session.custom_fields : [];
 
-  // Log exactly what Stripe sent so you can see the real key/value
-  console.log('custom_fields raw', JSON.stringify(cfs));
-
-  // helper to extract a value from a custom field object (text or dropdown)
-  const valueOf = (f) =>
-    (f?.text && f.text.value) ||
-    (f?.dropdown && f.dropdown.value) ||
-    null;
-
-  // try to find the field by key (case-insensitive), or fall back to the first field
+  const valueOf = (f) => (f?.text && f.text.value) || (f?.dropdown && f.dropdown.value) || null;
   const langField =
-    cfs.find(f => String(f.key || '').toLowerCase() === LANGUAGE_FIELD_KEY) ||
-    cfs[0] || null;
+    cfs.find(f => String(f.key || '').toLowerCase() === LANGUAGE_FIELD_KEY_LC) || cfs[0] || null;
 
-  const rawVal = valueOf(langField);
-  const val = rawVal ? String(rawVal).trim() : null;
+  const val = langField ? String(valueOf(langField) || '').trim() : null;
 
-  // map case-insensitively too, just in case
   const LANG_TO_PRODUCT_LC = {
     french: PRODUCT.FR, spanish: PRODUCT.ES, german: PRODUCT.DE,
     portuguese: PRODUCT.PT, italian: PRODUCT.IT, korean: PRODUCT.KO, japanese: PRODUCT.JA
@@ -105,13 +91,9 @@ function productFromSession(session) {
 
   if (inSet(PAYMENT_LINK.SINGLE_LANGUAGE, pl)) {
     console.log('route: SINGLE_LANGUAGE', {
-      payment_link: pl,
-      chosenLabel: langField?.label || null,    // what buyer saw
-      keyUsed: langField?.key || null,          // the internal key Stripe set
-      chosenValue: val,
-      mapped
+      payment_link: pl, chosenLabel: langField?.label || null, keyUsed: langField?.key || null, chosenValue: val, mapped
     });
-    return mapped || PRODUCT.FR; // safe fallback
+    return mapped || PRODUCT.FR;
   }
   if (inSet(PAYMENT_LINK.POLYGLOT_STEAM, pl)) {
     console.log('route: POLYGLOT_STEAM', { payment_link: pl });
@@ -121,7 +103,6 @@ function productFromSession(session) {
     console.log('route: POLYGLOT_ITCH', { payment_link: pl });
     return PRODUCT.POLY_ITCH;
   }
-
   console.log('route: DEFAULT (no payment_link match)', { payment_link: pl });
   return PRODUCT.POLY_STEAM;
 }
@@ -137,93 +118,78 @@ async function getSheets() {
   return google.sheets({ version: 'v4', auth: jwt });
 }
 
-// Each tab columns: A key | B assigned_to_email | C assigned_at_iso | D stripe_session_id | E payment_link_id | F notes
+// --- Find/assign key in a tab
 async function findAndAssignKey({ sheetTab, email, sessionId, paymentLinkId }) {
   console.log('sheets: reading tab', sheetTab);
   const sheets = await getSheets();
-  const readRange = `${sheetTab}!A2:F`;
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: GOOGLE_SHEETS_ID,
-    range: readRange
+    range: `${sheetTab}!A2:F`
   });
   const rows = res.data.values || [];
   console.log('sheets: rows read', rows.length);
 
-  // Idempotency: if this session already processed, return that key
+  // idempotency
   for (let i = 0; i < rows.length; i++) {
     const existingSession = rows[i][3];
     if (existingSession === sessionId) {
       const k = rows[i][0];
-      console.log('sheets: already assigned for this session; returning existing key', { row: i + 2, key: k });
+      console.log('sheets: already assigned; returning existing key', { row: i + 2, key: k });
       return { key: k };
     }
   }
 
-  // Find first unused row (no assigned_to_email in column B)
-  let rowIndex = -1;
-  let key = null;
+  // first free row
+  let rowIndex = -1, key = null;
   for (let i = 0; i < rows.length; i++) {
-    const k = rows[i][0];
-    const assignedEmail = rows[i][1];
-    if (k && (!assignedEmail || assignedEmail === '')) {
-      rowIndex = i;
-      key = k;
-      break;
-    }
+    const k = rows[i][0], assignedEmail = rows[i][1];
+    if (k && (!assignedEmail || assignedEmail === '')) { rowIndex = i; key = k; break; }
   }
-
-  if (!key) {
-    console.warn('sheets: NO FREE KEY in tab', sheetTab);
-    return { key: null };
-  }
+  if (!key) { console.warn('sheets: NO FREE KEY in tab', sheetTab); return { key: null }; }
 
   const when = new Date().toISOString();
-  const targetRow = 2 + rowIndex; // actual sheet row number
-  const updateRange = `${sheetTab}!B${targetRow}:E${targetRow}`; // write cols B..E
+  const targetRow = 2 + rowIndex;
+  const updateRange = `${sheetTab}!B${targetRow}:E${targetRow}`;
   const values = [[email, when, sessionId, paymentLinkId || '']];
+  console.log('sheets: assigning key', { key, row: targetRow, updateRange });
 
-  console.log('sheets: assigning key', { key, row: targetRow, updateRange, email, when, sessionId, paymentLinkId });
   await sheets.spreadsheets.values.update({
     spreadsheetId: GOOGLE_SHEETS_ID,
     range: updateRange,
     valueInputOption: 'RAW',
     requestBody: { values }
   });
-
-  console.log('sheets: assignment complete');
   return { key };
 }
 
-// --- Helpers for MailerLite group handling
+// --- MailerLite helpers
 function envList(name) {
   const v = process.env[name];
   return v ? v.split(',').map(s => s.trim()).filter(Boolean) : [];
 }
-
-// Map product -> groups (IDs from env)
 function groupsForProduct(product) {
   const common = envList('ML_GROUPS_ALL');
   switch (product) {
-    case PRODUCT.FR: return common.concat(envList('ML_GROUPS_FR'));
-    case PRODUCT.ES: return common.concat(envList('ML_GROUPS_ES'));
-    case PRODUCT.DE: return common.concat(envList('ML_GROUPS_DE'));
-    case PRODUCT.PT: return common.concat(envList('ML_GROUPS_PT'));
-    case PRODUCT.IT: return common.concat(envList('ML_GROUPS_IT'));
-    case PRODUCT.KO: return common.concat(envList('ML_GROUPS_KO'));
-    case PRODUCT.JA: return common.concat(envList('ML_GROUPS_JA'));
-    case PRODUCT.POLY_STEAM: return common.concat(envList('ML_GROUPS_POLY_STEAM'));
-    case PRODUCT.POLY_ITCH: return common.concat(envList('ML_GROUPS_POLY_ITCH'));
-    default: return common;
+    case PRODUCT.FR:
+    case PRODUCT.ES:
+    case PRODUCT.DE:
+    case PRODUCT.PT:
+    case PRODUCT.IT:
+    case PRODUCT.KO:
+    case PRODUCT.JA:
+    case PRODUCT.POLY_STEAM:
+      return common.concat(envList('ML_GROUPS_POLY_STEAM'));
+    case PRODUCT.POLY_ITCH:
+      return common.concat(envList('ML_GROUPS_POLY_ITCH'));
+    default:
+      return common;
   }
 }
-
-// --- Upsert subscriber in MailerLite and set key field (uses Node 18+ global fetch)
 async function upsertMailerLite({ email, product, key }) {
   const api = 'https://connect.mailerlite.com/api';
   const groups = groupsForProduct(product);
   const steamKeyField = ML_FIELD_STEAM_KEY || 'steam_key';
   const itchKeyField  = ML_FIELD_ITCH_KEY  || 'itch_key';
-
   const fields = {};
   if (product === PRODUCT.POLY_ITCH) fields[itchKeyField] = key;
   else fields[steamKeyField] = key;
@@ -243,7 +209,149 @@ async function upsertMailerLite({ email, product, key }) {
 
   const text = await res.text().catch(() => '');
   console.log('ml: response', { status: res.status, ok: res.ok, len: text.length, preview: text.slice(0, 120) });
+  return res.ok;
+}
+// Optional: try to fetch an existing subscriber and reuse their IP if present
+async function lookupMailerLiteIp(email) {
+  if (!MAILERLITE_API_KEY) return null;
+  try {
+    const res = await fetch(`https://connect.mailerlite.com/api/subscribers/${encodeURIComponent(email)}`, {
+      headers: {
+        'Authorization': `Bearer ${MAILERLITE_API_KEY}`,
+        'Accept': 'application/json'
+      }
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    const ip = json?.data?.ip_address || json?.data?.optin_ip || null;
+    if (ip) console.log('ml: found subscriber IP', ip);
+    return ip || null;
+  } catch {
+    return null;
+  }
+}
 
+// --- Stripe helpers for TikTok payload
+async function getLineItemInfo(sessionId) {
+  try {
+    const li = await stripe.checkout.sessions.listLineItems(sessionId, {
+      limit: 1,
+      expand: ['data.price.product']
+    });
+    const item = li?.data?.[0];
+    if (!item) return {};
+    const unitPrice = typeof item.amount_total === 'number'
+      ? item.amount_total / 100
+      : (item.price?.unit_amount ? item.price.unit_amount / 100 : null);
+    const currency = (item.currency || '').toUpperCase() || null;
+    const name = item.description || item.price?.product?.name || null;
+    return { unitPrice, currency, name };
+  } catch (e) {
+    console.log('stripe: listLineItems failed', e.message);
+    return {};
+  }
+}
+async function getPaymentLinkUrl(paymentLinkId) {
+  if (!paymentLinkId) return null;
+  try {
+    const pl = await stripe.paymentLinks.retrieve(paymentLinkId);
+    return pl?.url || null;
+  } catch (e) {
+    console.log('stripe: retrieve payment link failed', e.message);
+    return null;
+  }
+}
+async function getCustomerPhone(session) {
+  const phone = session?.customer_details?.phone || null;
+  if (phone) return phone;
+  if (session.customer) {
+    try {
+      const cust = await stripe.customers.retrieve(session.customer);
+      return cust?.phone || null;
+    } catch (e) {
+      console.log('stripe: retrieve customer failed', e.message);
+    }
+  }
+  return null;
+}
+
+// --- TikTok Events API helpers (always use Purchase)
+const TIKTOK_TOKEN = TIKTOK_ACCESS_TOKEN || TIKTOK_API_KEY;
+const TIKTOK_ENDPOINT = 'https://business-api.tiktok.com/open_api/v1.3/event/track/'; // v1.3
+function sha256Lower(s) {
+  return crypto.createHash('sha256').update(String(s || '').trim().toLowerCase()).digest('hex');
+}
+
+async function sendTikTokEvent({ session, email, product, ip, url, phone, ttclid, ttp, contentName }) {
+  if (!TIKTOK_TOKEN || !TIKTOK_PIXEL) {
+    console.log('tiktok: missing token or pixel; skipping');
+    return false;
+  }
+
+  // Prefer exact amounts; fallback to 15 USD as requested
+  const sessionTotal = typeof session.amount_total === 'number' ? session.amount_total / 100 : null;
+  const { unitPrice, currency: liCurrency, name: liName } = await getLineItemInfo(session.id);
+  const value = sessionTotal ?? unitPrice ?? 15;
+  const currency = (session.currency || liCurrency || 'USD').toUpperCase();
+  const price = unitPrice ?? value;
+  const contentNameFinal = contentName || liName || product;
+
+  // TikTok Purchase payload
+  const body = {
+    event: 'Purchase',
+    event_id: session.id,
+    event_time: new Date().toISOString(),
+    event_source: 'web',
+    event_source_id: TIKTOK_PIXEL,
+    user: {
+      email: sha256Lower(email),
+      phone: phone ? sha256Lower(phone) : undefined,
+      external_id: session.customer ? sha256Lower(session.customer) : undefined,
+      ip: ip || undefined,
+      user_agent: undefined, // not available from Stripe webhook
+      ttclid: ttclid || undefined,
+      ttp: ttp || undefined
+    },
+    properties: {
+      value,
+      currency,
+      // one product per purchase for your flow
+      contents: [{
+        content_id: product,
+        content_type: 'product',
+        content_name: contentNameFinal,
+        price,
+        quantity: 1
+      }],
+      url: url || undefined
+    },
+    test_event_code: TIKTOK_TEST_EVENT_CODE || undefined
+  };
+
+  console.log('tiktok: sending', {
+    event: body.event,
+    event_id: body.event_id,
+    value: body.properties.value,
+    currency: body.properties.currency,
+    price: body.properties.contents?.[0]?.price,
+    url: body.properties.url,
+    has_ip: !!body.user.ip,
+    has_ttclid: !!body.user.ttclid,
+    has_ttp: !!body.user.ttp
+  });
+
+  const res = await fetch(TIKTOK_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      'Access-Token': TIKTOK_TOKEN,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json'
+    },
+    body: JSON.stringify(body)
+  });
+
+  const text = await res.text().catch(() => '');
+  console.log('tiktok: response', { status: res.status, ok: res.ok, len: text.length, preview: text.slice(0, 200) });
   return res.ok;
 }
 
@@ -267,12 +375,7 @@ exports.handler = async (event) => {
 
   let stripeEvent;
   try {
-    // IMPORTANT: pass the raw string body to Stripe
-    stripeEvent = stripe.webhooks.constructEvent(
-      event.body,
-      sig,
-      STRIPE_WEBHOOK_SECRET
-    );
+    stripeEvent = stripe.webhooks.constructEvent(event.body, sig, STRIPE_WEBHOOK_SECRET);
   } catch (err) {
     console.error('sig fail:', err.message);
     return { statusCode: 400, body: `Webhook signature verification failed: ${err.message}` };
@@ -280,7 +383,6 @@ exports.handler = async (event) => {
 
   console.log('ok: event verified', { id: stripeEvent.id, type: stripeEvent.type });
 
-  // Only handle paid sessions
   if (stripeEvent.type !== 'checkout.session.completed' &&
       stripeEvent.type !== 'checkout.session.async_payment_succeeded') {
     console.log('info: ignored event type', stripeEvent.type);
@@ -309,13 +411,12 @@ exports.handler = async (event) => {
   const product = productFromSession(session);
   const sheetTab = SHEET_TAB_BY_PRODUCT[product];
   console.log('routing decision', { product, sheetTab });
-
   if (!sheetTab) {
     console.warn('warn: unknown product', { product });
     return { statusCode: 200, body: 'Unknown product' };
   }
 
-  // Read/assign key in Sheets
+  // Assign key
   let key;
   try {
     const r = await findAndAssignKey({
@@ -327,7 +428,6 @@ exports.handler = async (event) => {
     key = r.key;
   } catch (err) {
     console.error('sheets error:', err.message);
-    // Return 500 so Stripe retries; safer than silently dropping fulfillment
     return { statusCode: 500, body: 'Sheets error' };
   }
 
@@ -335,19 +435,38 @@ exports.handler = async (event) => {
     console.warn('warn: no keys available for', { sheetTab });
     return { statusCode: 200, body: 'No keys available' };
   }
-
   console.log('ok: got key', { product, sheetTab, keyPreview: String(key).slice(0, 4) + '...' });
 
-  // Upsert subscriber in MailerLite
+  // Upsert in MailerLite (don’t block if it fails)
   try {
     const ok = await upsertMailerLite({ email, product, key });
     if (!ok) console.warn('warn: mailerlite upsert not ok');
   } catch (err) {
     console.error('mailerlite error:', err.message);
-    // Do NOT throw; key is already consumed. We acknowledge to avoid duplicate key assignment.
+  }
+
+  // TikTok Conversion (best-effort, doesn’t block)
+  try {
+    const ip = await lookupMailerLiteIp(email); // may be null
+    const url = await getPaymentLinkUrl(session.payment_link);
+    const phone = await getCustomerPhone(session);
+    const ttclid = session?.metadata?.ttclid || null;
+    const ttp = session?.metadata?.ttp || null;
+    await sendTikTokEvent({
+      session,
+      email,
+      product,
+      ip,
+      url,
+      phone,
+      ttclid,
+      ttp,
+      contentName: sheetTab // nice name e.g. "French Steam"
+    });
+  } catch (err) {
+    console.error('tiktok error:', err.message);
   }
 
   console.log('ok: fulfillment complete');
   return { statusCode: 200, body: 'OK' };
 };
-
