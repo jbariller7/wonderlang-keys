@@ -1,4 +1,4 @@
-// netlify/functions/stripe-webhook.js
+// netlify/functions/stripe-webhook.js test
 const Stripe = require('stripe');
 const { google } = require('googleapis');
 const crypto = require('crypto');
@@ -480,3 +480,4 @@ exports.handler = async (event) => {
   console.log('ok: fulfillment complete');
   return { statusCode: 200, body: 'OK' };
 };
+
