@@ -33,10 +33,10 @@ const stripe = new Stripe(STRIPE_API_KEY, { apiVersion: '2024-06-20' });
 // --- Payment Link mapping (include BOTH live and test IDs)
 const PAYMENT_LINK = {
   SINGLE_LANGUAGE: [
-    'plink_1RoKYZBFbQoDa6p0hCPS3d2g', 'plink_1Rzg6lBFbQoDa6p0bmGphygN'
+    'plink_1RoKYZBFbQoDa6p0hCPS3d2g', 'plink_1Rzg6lBFbQoDa6p0bmGphygN', 'plink_1RvKx8BFbQoDa6p0PaVih8U5'
   ],
   POLYGLOT_STEAM: [
-    'plink_1RoLRRBFbQoDa6p0g9zXIJaM', 'plink_1Rzg0NBFbQoDa6p0fL5aVAsU'
+    'plink_1RoLRRBFbQoDa6p0g9zXIJaM', 'plink_1Rzg0NBFbQoDa6p0fL5aVAsU', 'plink_1RvL4VBFbQoDa6p09A00tNAR'
   ],
   POLYGLOT_ITCH: [
     'plink_1RoNLzBFbQoDa6p0lvW7lw5f', 'plink_1RoN4QBFbQoDa6p0fQ8Xc3Vs',
@@ -480,4 +480,5 @@ exports.handler = async (event) => {
   console.log('ok: fulfillment complete');
   return { statusCode: 200, body: 'OK' };
 };
+
 
