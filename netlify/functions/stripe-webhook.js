@@ -39,8 +39,8 @@ const PAYMENT_LINK = {
     'plink_1RoLRRBFbQoDa6p0g9zXIJaM', 'plink_1Rzg0NBFbQoDa6p0fL5aVAsU', 'plink_1RvL4VBFbQoDa6p09A00tNAR'
   ],
   POLYGLOT_ITCH: [
-    'plink_1RoNLzBFbQoDa6p0lvW7lw5f', 'plink_1RoN4QBFbQoDa6p0fQ8Xc3Vs',
-    'plink_1Rzg7fBFbQoDa6p0UCIOzCtk'
+    'plink_1RoNLzBFbQoDa6p0lvW7lw5f', 'plink_1RoN4QBFbQoDa6p0fQ8Xc3Vs', 'plink_1S2w5eBFbQoDa6p06bwPV6Hp',
+    'plink_1Rzg7fBFbQoDa6p0UCIOzCtk', 'plink_1S2wD2BFbQoDa6p0w2tvZNiG'
   ]
 };
 
@@ -480,5 +480,6 @@ exports.handler = async (event) => {
   console.log('ok: fulfillment complete');
   return { statusCode: 200, body: 'OK' };
 };
+
 
 
