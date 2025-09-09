@@ -25,8 +25,13 @@ const {
   TIKTOK_ACCESS_TOKEN,
   TIKTOK_PIXEL,             // Pixel ID
   TIKTOK_TEST_EVENT_CODE,   // optional for Test Events
-  LANGUAGE_FIELD_KEY        // optional: Stripe custom field "key" for language
+  LANGUAGE_FIELD_KEY,        // optional: Stripe custom field "key" for language
+  // Meta
+  META_PIXEL,
+  META_ACCESS_TOKEN,
+  META_TEST_EVENT_CODE
 } = process.env;
+
 
 const stripe = new Stripe(STRIPE_API_KEY, { apiVersion: '2024-06-20' });
 
@@ -231,6 +236,85 @@ async function lookupMailerLiteIp(email) {
   } catch {
     return null;
   }
+}
+const META_ENDPOINT = (pixel) => `https://graph.facebook.com/v20.0/${pixel}/events`;
+
+function cleanForHash(s) {
+  // Meta recommends trimming, lowercasing; you already do that in sha256Lower.
+  // For phone you can also strip non-digits before hashing (optional).
+  return String(s || '').trim();
+}
+function sha256LowerRaw(s) {
+  return crypto.createHash('sha256').update(cleanForHash(s).toLowerCase()).digest('hex');
+}
+
+async function sendMetaPurchase({ session, email, product, ip, url, phone, fbc, fbp, contentName }) {
+  if (!META_PIXEL || !META_ACCESS_TOKEN) {
+    console.log('meta: missing token or pixel; skipping');
+    return false;
+  }
+
+  // Prefer exact amounts; fall back like TikTok
+  const sessionTotal = typeof session.amount_total === 'number' ? session.amount_total / 100 : null;
+  const { unitPrice, currency: liCurrency, name: liName } = await getLineItemInfo(session.id);
+  const value = sessionTotal ?? unitPrice ?? 15;
+  const currency = (session.currency || liCurrency || 'USD').toUpperCase();
+  const price = unitPrice ?? value;
+  const contentNameFinal = contentName || liName || product;
+
+  const user_data = {
+    em: sha256LowerRaw(email),
+    ph: phone ? sha256LowerRaw(phone) : undefined,
+    external_id: session.customer ? sha256LowerRaw(session.customer) : undefined,
+    client_ip_address: ip || undefined,
+    // If you can capture these in the browser and pass via Stripe metadata, include them:
+    fbp: fbp || undefined,
+    fbc: fbc || undefined
+    // client_user_agent can be included if you have it
+  };
+
+  const custom_data = {
+    currency,
+    value,
+    content_type: 'product',
+    content_ids: [product],
+    content_name: contentNameFinal,
+    contents: [{ id: product, quantity: 1, item_price: price }]
+  };
+
+  const ev = {
+    event_name: 'Purchase',
+    event_time: Math.floor(Date.now() / 1000),
+    action_source: 'website',
+    event_source_url: url || undefined,   // safe to omit if you do not have one
+    event_id: session.id,                 // helps dedupe if you also send from browser
+    user_data,
+    custom_data
+  };
+
+  const body = {
+    data: [ev],
+    test_event_code: META_TEST_EVENT_CODE || undefined
+  };
+
+  console.log('meta: sending', {
+    event_id: ev.event_id,
+    value: custom_data.value,
+    currency: custom_data.currency,
+    has_ip: !!user_data.client_ip_address,
+    has_fbp: !!user_data.fbp,
+    has_fbc: !!user_data.fbc
+  });
+
+  const res = await fetch(`${META_ENDPOINT(META_PIXEL)}?access_token=${encodeURIComponent(META_ACCESS_TOKEN)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify(body)
+  });
+
+  const text = await res.text().catch(() => '');
+  console.log('meta: response', { status: res.status, ok: res.ok, len: text.length, preview: text.slice(0, 200) });
+  return res.ok;
 }
 
 // --- Stripe helpers for TikTok payload
@@ -455,31 +539,48 @@ exports.handler = async (event) => {
     console.error('mailerlite error:', err.message);
   }
 
-  // TikTok Conversion (best-effort, doesn’t block)
-  try {
-    const ip = await lookupMailerLiteIp(email); // may be null
-    const url = await getPaymentLinkUrl(session.payment_link);
-    const phone = await getCustomerPhone(session);
-    const ttclid = session?.metadata?.ttclid || null;
-    const ttp = session?.metadata?.ttp || null;
-    await sendTikTokEvent({
-      session,
-      email,
-      product,
-      ip,
-      url,
-      phone,
-      ttclid,
-      ttp,
-      contentName: sheetTab // e.g. "French Steam"
-    });
-  } catch (err) {
-    console.error('tiktok error:', err.message);
-  }
+// TikTok Conversion (best-effort, doesn’t block)
+try {
+  const ip = await lookupMailerLiteIp(email); // may be null
+  const url = await getPaymentLinkUrl(session.payment_link);
+  const phone = await getCustomerPhone(session);
+  const ttclid = session?.metadata?.ttclid || null;
+  const ttp = session?.metadata?.ttp || null;
+  await sendTikTokEvent({
+    session,
+    email,
+    product,
+    ip,
+    url,
+    phone,
+    ttclid,
+    ttp,
+    contentName: sheetTab
+  });
+
+  // Meta Conversion (best-effort, doesn’t block)
+  const fbc = session?.metadata?.fbc || null; // capture these in the browser if possible
+  const fbp = session?.metadata?.fbp || null;
+  await sendMetaPurchase({
+    session,
+    email,
+    product,
+    ip,
+    url,
+    phone,
+    fbc,
+    fbp,
+    contentName: sheetTab
+  });
+} catch (err) {
+  console.error('tiktok/meta error:', err.message);
+}
+
 
   console.log('ok: fulfillment complete');
   return { statusCode: 200, body: 'OK' };
 };
+
 
 
 
