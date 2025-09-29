@@ -1,4 +1,4 @@
-// netlify/functions/stripe-webhook.js test
+// netlify/functions/stripe-webhook.js (robust language resolution)
 const Stripe = require('stripe');
 const { google } = require('googleapis');
 const crypto = require('crypto');
@@ -21,17 +21,19 @@ const {
   ML_GROUPS_POLY_STEAM, ML_GROUPS_POLY_ITCH,
 
   // TikTok
-  TIKTOK_API_KEY,           // Access Token (alias supported below)
+  TIKTOK_API_KEY,
   TIKTOK_ACCESS_TOKEN,
-  TIKTOK_PIXEL,             // Pixel ID
-  TIKTOK_TEST_EVENT_CODE,   // optional for Test Events
-  LANGUAGE_FIELD_KEY,        // optional: Stripe custom field "key" for language
+  TIKTOK_PIXEL,
+  TIKTOK_TEST_EVENT_CODE,
+
+  // Optional Stripe custom field "key" for language
+  LANGUAGE_FIELD_KEY,
+
   // Meta
   META_PIXEL,
   META_ACCESS_TOKEN,
   META_TEST_EVENT_CODE
 } = process.env;
-
 
 const stripe = new Stripe(STRIPE_API_KEY, { apiVersion: '2024-06-20' });
 
@@ -76,42 +78,83 @@ const SHEET_TAB_BY_PRODUCT = {
 const inSet = (arr, id) => Array.isArray(arr) && arr.includes(id);
 const LANGUAGE_FIELD_KEY_LC = (LANGUAGE_FIELD_KEY || 'language').toLowerCase();
 
-// ---- Decide product from session (reads your custom field even if label != key)
-function productFromSession(session) {
-  const pl = session.payment_link;
-  const cfs = Array.isArray(session.custom_fields) ? session.custom_fields : [];
+// --- Robust normalization + aliasing
+function norm(s) {
+  return String(s || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+}
 
-  const valueOf = (f) => (f?.text && f.text.value) || (f?.dropdown && f.dropdown.value) || null;
-  const langField =
-    cfs.find(f => String(f.key || '').toLowerCase() === LANGUAGE_FIELD_KEY_LC) || cfs[0] || null;
+const LANG_ALIASES = {
+  [PRODUCT.FR]: ['fr', 'fra', 'fr-fr', 'french', 'francais', 'français'],
+  [PRODUCT.ES]: ['es', 'spa', 'es-es', 'spanish', 'espanol', 'español', 'castellano'],
+  [PRODUCT.DE]: ['de', 'deu', 'ger', 'de-de', 'german', 'deutsch'],
+  [PRODUCT.PT]: ['pt', 'por', 'pt-pt', 'pt-br', 'portuguese', 'portugues', 'português'],
+  [PRODUCT.IT]: ['it', 'ita', 'it-it', 'italian', 'italiano'],
+  [PRODUCT.KO]: ['ko', 'kor', 'ko-kr', 'korean', 'hangul', 'hangeul', '한국어', '한글', '조선말'],
+  [PRODUCT.JA]: ['ja', 'jpn', 'ja-jp', 'japanese', 'nihongo', 'にほんご', '日本語', 'にっぽんご']
+};
 
-  const val = langField ? String(valueOf(langField) || '').trim() : null;
+function resolveLanguageToProduct(raw) {
+  const n = norm(raw);
+  if (!n) return null;
 
-  const LANG_TO_PRODUCT_LC = {
-    french: PRODUCT.FR, spanish: PRODUCT.ES, german: PRODUCT.DE,
-    portuguese: PRODUCT.PT, italian: PRODUCT.IT, korean: PRODUCT.KO, japanese: PRODUCT.JA
-  };
-  const mapped =
-    (val && LANGUAGE_TO_PRODUCT[val]) ||
-    (val && LANG_TO_PRODUCT_LC[val.toLowerCase()]) ||
-    null;
-
-  if (inSet(PAYMENT_LINK.SINGLE_LANGUAGE, pl)) {
-    console.log('route: SINGLE_LANGUAGE', {
-      payment_link: pl, chosenLabel: langField?.label || null, keyUsed: langField?.key || null, chosenValue: val, mapped
-    });
-    return mapped || PRODUCT.FR;
+  // Exact alias hits
+  for (const [prod, aliases] of Object.entries(LANG_ALIASES)) {
+    if (aliases.includes(n)) return prod;
   }
-  if (inSet(PAYMENT_LINK.POLYGLOT_STEAM, pl)) {
-    console.log('route: POLYGLOT_STEAM', { payment_link: pl });
-    return PRODUCT.POLY_STEAM;
+
+  // Substring hybrids like "Japanese / 日本語"
+  for (const [prod, aliases] of Object.entries(LANG_ALIASES)) {
+    if (aliases.some(a => a.length >= 2 && n.includes(a))) return prod;
   }
-  if (inSet(PAYMENT_LINK.POLYGLOT_ITCH, pl)) {
-    console.log('route: POLYGLOT_ITCH', { payment_link: pl });
-    return PRODUCT.POLY_ITCH;
+
+  // Direct exact mapping of canonical names
+  if (LANGUAGE_TO_PRODUCT[raw]) return LANGUAGE_TO_PRODUCT[raw];
+
+  return null;
+}
+
+function inferFromSessionLocale(locale) {
+  const n = norm(locale);
+  if (!n) return null;
+  if (n.startsWith('fr')) return PRODUCT.FR;
+  if (n.startsWith('es')) return PRODUCT.ES;
+  if (n.startsWith('de')) return PRODUCT.DE;
+  if (n.startsWith('pt')) return PRODUCT.PT;
+  if (n.startsWith('it')) return PRODUCT.IT;
+  if (n.startsWith('ko')) return PRODUCT.KO;
+  if (n.startsWith('ja')) return PRODUCT.JA;
+  return null;
+}
+
+function inferFromNameLike(s) {
+  const n = norm(s);
+  if (!n) return null;
+  if (/japan|nihon|nihongo|日本語|にほんご/.test(n)) return PRODUCT.JA;
+  if (/korea|hangul|hangeul|한국어|한글|조선말/.test(n)) return PRODUCT.KO;
+  if (/french|francais|français/.test(n)) return PRODUCT.FR;
+  if (/spanish|espanol|español|castellano/.test(n)) return PRODUCT.ES;
+  if (/german|deutsch/.test(n)) return PRODUCT.DE;
+  if (/portuguese|portugues|português/.test(n)) return PRODUCT.PT;
+  if (/italian|italiano/.test(n)) return PRODUCT.IT;
+  return null;
+}
+
+function extractAllCustomFieldValues(cfs) {
+  // Returns [{ key, label, value, type }]
+  const out = [];
+  if (!Array.isArray(cfs)) return out;
+  for (const f of cfs) {
+    const key = f?.key || null;
+    const label = f?.label || null;
+    const type = f?.type || (f?.text ? 'text' : f?.dropdown ? 'dropdown' : null);
+    const val = (f?.text && f.text.value) || (f?.dropdown && f.dropdown.value) || null;
+    out.push({ key, label, value: val, type });
   }
-  console.log('route: DEFAULT (no payment_link match)', { payment_link: pl });
-  return PRODUCT.POLY_STEAM;
+  return out;
 }
 
 // --- Google Sheets client
@@ -136,7 +179,7 @@ async function findAndAssignKey({ sheetTab, email, sessionId, paymentLinkId }) {
   const rows = res.data.values || [];
   console.log('sheets: rows read', rows.length);
 
-  // idempotency
+  // Idempotency
   for (let i = 0; i < rows.length; i++) {
     const existingSession = rows[i][3];
     if (existingSession === sessionId) {
@@ -146,7 +189,7 @@ async function findAndAssignKey({ sheetTab, email, sessionId, paymentLinkId }) {
     }
   }
 
-  // first free row
+  // First free row
   let rowIndex = -1, key = null;
   for (let i = 0; i < rows.length; i++) {
     const k = rows[i][0], assignedEmail = rows[i][1];
@@ -240,8 +283,6 @@ async function lookupMailerLiteIp(email) {
 const META_ENDPOINT = (pixel) => `https://graph.facebook.com/v20.0/${pixel}/events`;
 
 function cleanForHash(s) {
-  // Meta recommends trimming, lowercasing; you already do that in sha256Lower.
-  // For phone you can also strip non-digits before hashing (optional).
   return String(s || '').trim();
 }
 function sha256LowerRaw(s) {
@@ -254,7 +295,6 @@ async function sendMetaPurchase({ session, email, product, ip, url, phone, fbc, 
     return false;
   }
 
-  // Prefer exact amounts; fall back like TikTok
   const sessionTotal = typeof session.amount_total === 'number' ? session.amount_total / 100 : null;
   const { unitPrice, currency: liCurrency, name: liName } = await getLineItemInfo(session.id);
   const value = sessionTotal ?? unitPrice ?? 15;
@@ -267,10 +307,8 @@ async function sendMetaPurchase({ session, email, product, ip, url, phone, fbc, 
     ph: phone ? sha256LowerRaw(phone) : undefined,
     external_id: session.customer ? sha256LowerRaw(session.customer) : undefined,
     client_ip_address: ip || undefined,
-    // If you can capture these in the browser and pass via Stripe metadata, include them:
     fbp: fbp || undefined,
     fbc: fbc || undefined
-    // client_user_agent can be included if you have it
   };
 
   const custom_data = {
@@ -286,8 +324,8 @@ async function sendMetaPurchase({ session, email, product, ip, url, phone, fbc, 
     event_name: 'Purchase',
     event_time: Math.floor(Date.now() / 1000),
     action_source: 'website',
-    event_source_url: url || undefined,   // safe to omit if you do not have one
-    event_id: session.id,                 // helps dedupe if you also send from browser
+    event_source_url: url || undefined,
+    event_id: session.id,
     user_data,
     custom_data
   };
@@ -317,7 +355,7 @@ async function sendMetaPurchase({ session, email, product, ip, url, phone, fbc, 
   return res.ok;
 }
 
-// --- Stripe helpers for TikTok payload
+// --- Stripe helpers
 async function getLineItemInfo(sessionId) {
   try {
     const li = await stripe.checkout.sessions.listLineItems(sessionId, {
@@ -361,9 +399,9 @@ async function getCustomerPhone(session) {
   return null;
 }
 
-// --- TikTok Events API helpers (always use Purchase)
+// --- TikTok Events API helpers
 const TIKTOK_TOKEN = TIKTOK_ACCESS_TOKEN || TIKTOK_API_KEY;
-const TIKTOK_ENDPOINT = 'https://business-api.tiktok.com/open_api/v1.3/event/track/'; // v1.3
+const TIKTOK_ENDPOINT = 'https://business-api.tiktok.com/open_api/v1.3/event/track/';
 function sha256Lower(s) {
   return crypto.createHash('sha256').update(String(s || '').trim().toLowerCase()).digest('hex');
 }
@@ -374,7 +412,6 @@ async function sendTikTokEvent({ session, email, product, ip, url, phone, ttclid
     return false;
   }
 
-  // Prefer exact amounts; fallback to 15 USD as requested
   const sessionTotal = typeof session.amount_total === 'number' ? session.amount_total / 100 : null;
   const { unitPrice, currency: liCurrency, name: liName } = await getLineItemInfo(session.id);
   const value = sessionTotal ?? unitPrice ?? 15;
@@ -382,24 +419,21 @@ async function sendTikTokEvent({ session, email, product, ip, url, phone, ttclid
   const price = unitPrice ?? value;
   const contentNameFinal = contentName || liName || product;
 
-  // TikTok requires a top-level "data" array with events
   const eventObj = {
     event: 'Purchase',
     event_id: session.id,
-    event_time: Math.floor(Date.now() / 1000), // seconds
+    event_time: Math.floor(Date.now() / 1000),
     user: {
       email: sha256Lower(email),
       phone: phone ? sha256Lower(phone) : undefined,
       external_id: session.customer ? sha256Lower(session.customer) : undefined,
       ip: ip || undefined,
-      // user_agent: undefined (not available from Stripe webhook)
       ttclid: ttclid || undefined,
       ttp: ttp || undefined
     },
     properties: {
       value,
       currency,
-      // include both a concise set of props and the contents array
       content_id: product,
       content_type: 'product',
       content_name: contentNameFinal,
@@ -449,6 +483,69 @@ async function sendTikTokEvent({ session, email, product, ip, url, phone, ttclid
   return res.ok;
 }
 
+// --- Robust product routing
+async function productFromSession(session) {
+  const pl = session.payment_link;
+  const cfs = Array.isArray(session.custom_fields) ? session.custom_fields : [];
+  const allFields = extractAllCustomFieldValues(cfs);
+
+  // 1) Explicit metadata first
+  const metaLang = session?.metadata?.language || session?.metadata?.lang || null;
+  let resolved = resolveLanguageToProduct(metaLang);
+
+  // 2) Custom field by configured key
+  if (!resolved && allFields.length) {
+    const byKey = allFields.find(f => String(f.key || '').toLowerCase() === LANGUAGE_FIELD_KEY_LC);
+    if (byKey) resolved = resolveLanguageToProduct(byKey.value);
+    console.log('lang via custom_field by key', { key: byKey?.key || null, value: byKey?.value || null, resolved });
+  }
+
+  // 3) Scan every custom field
+  if (!resolved && allFields.length) {
+    for (const f of allFields) {
+      const r = resolveLanguageToProduct(f.value);
+      if (r) { resolved = r; break; }
+    }
+    console.log('lang via any custom_field', { fields: allFields, resolved });
+  }
+
+  // 4) Fallback to line item name
+  if (!resolved) {
+    try {
+      const { name } = await getLineItemInfo(session.id);
+      resolved = inferFromNameLike(name);
+      if (resolved) console.log('lang via line item name', { name, resolved });
+    } catch {}
+  }
+
+  // 5) Fallback to session.locale
+  if (!resolved) {
+    resolved = inferFromSessionLocale(session?.locale);
+    if (resolved) console.log('lang via session.locale', { locale: session?.locale, resolved });
+  }
+
+  // Routing decisions
+  if (inSet(PAYMENT_LINK.SINGLE_LANGUAGE, pl)) {
+    console.log('route: SINGLE_LANGUAGE', { payment_link: pl, resolved, allFields, metaLang });
+    if (!resolved) {
+      // Safer behavior: do not hand out the wrong key
+      throw new Error('Language selection missing or unrecognized for SINGLE_LANGUAGE');
+    }
+    return resolved;
+  }
+  if (inSet(PAYMENT_LINK.POLYGLOT_STEAM, pl)) {
+    console.log('route: POLYGLOT_STEAM', { payment_link: pl });
+    return PRODUCT.POLY_STEAM;
+  }
+  if (inSet(PAYMENT_LINK.POLYGLOT_ITCH, pl)) {
+    console.log('route: POLYGLOT_ITCH', { payment_link: pl });
+    return PRODUCT.POLY_ITCH;
+  }
+
+  console.log('route: DEFAULT (no payment_link match)', { payment_link: pl, resolved });
+  return resolved || PRODUCT.POLY_STEAM;
+}
+
 // --- Main handler
 exports.handler = async (event) => {
   if (event.httpMethod !== 'POST') {
@@ -461,7 +558,6 @@ exports.handler = async (event) => {
     event.headers['Stripe-Signature'] ||
     event.headers['STRIPE-SIGNATURE'];
 
-  // Debug: prove what we received
   console.log('dbg sig present:', !!sig, 'len:', sig ? sig.length : 0);
   console.log('dbg isBase64Encoded:', !!event.isBase64Encoded);
   console.log('dbg body prefix:', (event.body || '').slice(0, 60));
@@ -469,6 +565,7 @@ exports.handler = async (event) => {
 
   let stripeEvent;
   try {
+    // Note: On Netlify, make sure body is NOT parsed before here
     stripeEvent = stripe.webhooks.constructEvent(event.body, sig, STRIPE_WEBHOOK_SECRET);
   } catch (err) {
     console.error('sig fail:', err.message);
@@ -488,7 +585,9 @@ exports.handler = async (event) => {
     id: session.id,
     payment_status: session.payment_status,
     payment_link: session.payment_link,
-    has_custom_fields: Array.isArray(session.custom_fields)
+    has_custom_fields: Array.isArray(session.custom_fields),
+    locale: session.locale || null,
+    customer: session.customer || null
   });
 
   if (session.payment_status !== 'paid') {
@@ -502,7 +601,15 @@ exports.handler = async (event) => {
     return { statusCode: 200, body: 'No email in session' };
   }
 
-  const product = productFromSession(session);
+  let product;
+  try {
+    product = await productFromSession(session);
+  } catch (err) {
+    console.error('routing error:', err.message);
+    // Do not fulfill with a wrong language
+    return { statusCode: 200, body: 'Language not recognized for single-language link' };
+  }
+
   const sheetTab = SHEET_TAB_BY_PRODUCT[product];
   console.log('routing decision', { product, sheetTab });
   if (!sheetTab) {
@@ -531,7 +638,7 @@ exports.handler = async (event) => {
   }
   console.log('ok: got key', { product, sheetTab, keyPreview: String(key).slice(0, 4) + '...' });
 
-  // Upsert in MailerLite (don’t block if it fails)
+  // Upsert in MailerLite (best effort)
   try {
     const ok = await upsertMailerLite({ email, product, key });
     if (!ok) console.warn('warn: mailerlite upsert not ok');
@@ -539,48 +646,43 @@ exports.handler = async (event) => {
     console.error('mailerlite error:', err.message);
   }
 
-// TikTok Conversion (best-effort, doesn’t block)
-try {
-  const ip = await lookupMailerLiteIp(email); // may be null
-  const url = await getPaymentLinkUrl(session.payment_link);
-  const phone = await getCustomerPhone(session);
-  const ttclid = session?.metadata?.ttclid || null;
-  const ttp = session?.metadata?.ttp || null;
-  await sendTikTokEvent({
-    session,
-    email,
-    product,
-    ip,
-    url,
-    phone,
-    ttclid,
-    ttp,
-    contentName: sheetTab
-  });
+  // TikTok + Meta (best effort)
+  try {
+    const ip = await lookupMailerLiteIp(email); // may be null
+    const url = await getPaymentLinkUrl(session.payment_link);
+    const phone = await getCustomerPhone(session);
+    const ttclid = session?.metadata?.ttclid || null;
+    const ttp = session?.metadata?.ttp || null;
 
-  // Meta Conversion (best-effort, doesn’t block)
-  const fbc = session?.metadata?.fbc || null; // capture these in the browser if possible
-  const fbp = session?.metadata?.fbp || null;
-  await sendMetaPurchase({
-    session,
-    email,
-    product,
-    ip,
-    url,
-    phone,
-    fbc,
-    fbp,
-    contentName: sheetTab
-  });
-} catch (err) {
-  console.error('tiktok/meta error:', err.message);
-}
+    await sendTikTokEvent({
+      session,
+      email,
+      product,
+      ip,
+      url,
+      phone,
+      ttclid,
+      ttp,
+      contentName: sheetTab
+    });
 
+    const fbc = session?.metadata?.fbc || null;
+    const fbp = session?.metadata?.fbp || null;
+    await sendMetaPurchase({
+      session,
+      email,
+      product,
+      ip,
+      url,
+      phone,
+      fbc,
+      fbp,
+      contentName: sheetTab
+    });
+  } catch (err) {
+    console.error('tiktok/meta error:', err.message);
+  }
 
   console.log('ok: fulfillment complete');
   return { statusCode: 200, body: 'OK' };
 };
-
-
-
-
