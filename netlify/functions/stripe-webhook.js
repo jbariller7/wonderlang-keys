@@ -1,4 +1,4 @@
-// netlify/functions/stripe-webhook.js (robust language resolution)
+// netlify/functions/stripe-webhook.js
 const Stripe = require('stripe');
 const { google } = require('googleapis');
 const crypto = require('crypto');
@@ -37,7 +37,11 @@ const {
 
 const stripe = new Stripe(STRIPE_API_KEY, { apiVersion: '2024-06-20' });
 
-// --- Payment Link mapping (include BOTH live and test IDs)
+// --- Admin + bail config
+const ADMIN_EMAIL_FOR_BAIL = 'wonderlang.thegame@gmail.com';
+const ML_BAILED_GROUP_ID = '158395915765286796';
+
+// --- Payment Link mapping (live + test)
 const PAYMENT_LINK = {
   SINGLE_LANGUAGE: [
     'plink_1RoKYZBFbQoDa6p0hCPS3d2g', 'plink_1Rzg6lBFbQoDa6p0bmGphygN', 'plink_1RvKx8BFbQoDa6p0PaVih8U5'
@@ -101,7 +105,7 @@ function resolveLanguageToProduct(raw) {
   const n = norm(raw);
   if (!n) return null;
 
-  // Exact alias hits
+  // Alias hits
   for (const [prod, aliases] of Object.entries(LANG_ALIASES)) {
     if (aliases.includes(n)) return prod;
   }
@@ -111,7 +115,7 @@ function resolveLanguageToProduct(raw) {
     if (aliases.some(a => a.length >= 2 && n.includes(a))) return prod;
   }
 
-  // Direct exact mapping of canonical names
+  // Exact canonical name
   if (LANGUAGE_TO_PRODUCT[raw]) return LANGUAGE_TO_PRODUCT[raw];
 
   return null;
@@ -144,7 +148,6 @@ function inferFromNameLike(s) {
 }
 
 function extractAllCustomFieldValues(cfs) {
-  // Returns [{ key, label, value, type }]
   const out = [];
   if (!Array.isArray(cfs)) return out;
   for (const f of cfs) {
@@ -166,6 +169,23 @@ async function getSheets() {
     ['https://www.googleapis.com/auth/spreadsheets']
   );
   return google.sheets({ version: 'v4', auth: jwt });
+}
+
+// Append buyer email to Bailed!A:A
+async function appendBailedEmailToSheet(email) {
+  try {
+    const sheets = await getSheets();
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: GOOGLE_SHEETS_ID,
+      range: 'Bailed!A:A',
+      valueInputOption: 'RAW',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [[email]] }
+    });
+    console.log('bailed: appended to sheet', { email });
+  } catch (e) {
+    console.error('bailed: sheet append error', e.message);
+  }
 }
 
 // --- Find/assign key in a tab
@@ -235,6 +255,7 @@ function groupsForProduct(product) {
       return common;
   }
 }
+
 async function upsertMailerLite({ email, product, key }) {
   const api = 'https://connect.mailerlite.com/api';
   const groups = groupsForProduct(product);
@@ -261,15 +282,13 @@ async function upsertMailerLite({ email, product, key }) {
   console.log('ml: response', { status: res.status, ok: res.ok, len: text.length, preview: text.slice(0, 120) });
   return res.ok;
 }
-// Optional: try to fetch an existing subscriber and reuse their IP if present
+
+// Optional: try to fetch subscriber and reuse their IP
 async function lookupMailerLiteIp(email) {
   if (!MAILERLITE_API_KEY) return null;
   try {
     const res = await fetch(`https://connect.mailerlite.com/api/subscribers/${encodeURIComponent(email)}`, {
-      headers: {
-        'Authorization': `Bearer ${MAILERLITE_API_KEY}`,
-        'Accept': 'application/json'
-      }
+      headers: { 'Authorization': `Bearer ${MAILERLITE_API_KEY}`, 'Accept': 'application/json' }
     });
     if (!res.ok) return null;
     const json = await res.json();
@@ -280,11 +299,52 @@ async function lookupMailerLiteIp(email) {
     return null;
   }
 }
+
+// Bail notifier: set admin field and add to group
+async function notifyBailAdmin({ buyerEmail }) {
+  if (!MAILERLITE_API_KEY) {
+    console.warn('bailed: no ML key so admin notify skipped');
+    return;
+  }
+  const api = 'https://connect.mailerlite.com/api';
+  try {
+    // 1) Update admin subscriber custom field `bailed_email`
+    const payload = {
+      email: ADMIN_EMAIL_FOR_BAIL,
+      fields: { bailed_email: buyerEmail }
+    };
+    const patch = await fetch(`${api}/subscribers/${encodeURIComponent(ADMIN_EMAIL_FOR_BAIL)}`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${MAILERLITE_API_KEY}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+    const ptxt = await patch.text().catch(() => '');
+    console.log('bailed: ML admin patch', { status: patch.status, ok: patch.ok, preview: ptxt.slice(0, 120) });
+
+    // 2) Add admin to the bail group so your automation triggers
+    const add = await fetch(`${api}/groups/${ML_BAILED_GROUP_ID}/subscribers`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${MAILERLITE_API_KEY}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      body: JSON.stringify({ email: ADMIN_EMAIL_FOR_BAIL })
+    });
+    const atxt = await add.text().catch(() => '');
+    console.log('bailed: ML add-to-group', { status: add.status, ok: add.ok, preview: atxt.slice(0, 120) });
+  } catch (e) {
+    console.error('bailed: ML notify error', e.message);
+  }
+}
+
 const META_ENDPOINT = (pixel) => `https://graph.facebook.com/v20.0/${pixel}/events`;
 
-function cleanForHash(s) {
-  return String(s || '').trim();
-}
+function cleanForHash(s) { return String(s || '').trim(); }
 function sha256LowerRaw(s) {
   return crypto.createHash('sha256').update(cleanForHash(s).toLowerCase()).digest('hex');
 }
@@ -294,7 +354,6 @@ async function sendMetaPurchase({ session, email, product, ip, url, phone, fbc, 
     console.log('meta: missing token or pixel; skipping');
     return false;
   }
-
   const sessionTotal = typeof session.amount_total === 'number' ? session.amount_total / 100 : null;
   const { unitPrice, currency: liCurrency, name: liName } = await getLineItemInfo(session.id);
   const value = sessionTotal ?? unitPrice ?? 15;
@@ -330,10 +389,7 @@ async function sendMetaPurchase({ session, email, product, ip, url, phone, fbc, 
     custom_data
   };
 
-  const body = {
-    data: [ev],
-    test_event_code: META_TEST_EVENT_CODE || undefined
-  };
+  const body = { data: [ev], test_event_code: META_TEST_EVENT_CODE || undefined };
 
   console.log('meta: sending', {
     event_id: ev.event_id,
@@ -399,7 +455,7 @@ async function getCustomerPhone(session) {
   return null;
 }
 
-// --- TikTok Events API helpers
+// --- TikTok Events API
 const TIKTOK_TOKEN = TIKTOK_ACCESS_TOKEN || TIKTOK_API_KEY;
 const TIKTOK_ENDPOINT = 'https://business-api.tiktok.com/open_api/v1.3/event/track/';
 function sha256Lower(s) {
@@ -483,6 +539,15 @@ async function sendTikTokEvent({ session, email, product, ip, url, phone, ttclid
   return res.ok;
 }
 
+// --- Bail error class
+class BailError extends Error {
+  constructor(message, buyerEmail) {
+    super(message);
+    this.name = 'BailError';
+    this.buyerEmail = buyerEmail || null;
+  }
+}
+
 // --- Robust product routing
 async function productFromSession(session) {
   const pl = session.payment_link;
@@ -528,8 +593,7 @@ async function productFromSession(session) {
   if (inSet(PAYMENT_LINK.SINGLE_LANGUAGE, pl)) {
     console.log('route: SINGLE_LANGUAGE', { payment_link: pl, resolved, allFields, metaLang });
     if (!resolved) {
-      // Safer behavior: do not hand out the wrong key
-      throw new Error('Language selection missing or unrecognized for SINGLE_LANGUAGE');
+      throw new BailError('Language selection missing or unrecognized for SINGLE_LANGUAGE', null);
     }
     return resolved;
   }
@@ -552,7 +616,7 @@ exports.handler = async (event) => {
     return { statusCode: 405, body: 'Method Not Allowed' };
   }
 
-  // Signature header (case-insensitive)
+  // Signature header
   const sig =
     event.headers['stripe-signature'] ||
     event.headers['Stripe-Signature'] ||
@@ -565,7 +629,6 @@ exports.handler = async (event) => {
 
   let stripeEvent;
   try {
-    // Note: On Netlify, make sure body is NOT parsed before here
     stripeEvent = stripe.webhooks.constructEvent(event.body, sig, STRIPE_WEBHOOK_SECRET);
   } catch (err) {
     console.error('sig fail:', err.message);
@@ -601,88 +664,99 @@ exports.handler = async (event) => {
     return { statusCode: 200, body: 'No email in session' };
   }
 
-  let product;
   try {
-    product = await productFromSession(session);
+    const product = await productFromSession(session);
+
+    const sheetTab = SHEET_TAB_BY_PRODUCT[product];
+    console.log('routing decision', { product, sheetTab });
+    if (!sheetTab) {
+      console.warn('warn: unknown product', { product });
+      return { statusCode: 200, body: 'Unknown product' };
+    }
+
+    // Assign key
+    let key;
+    try {
+      const r = await findAndAssignKey({
+        sheetTab,
+        email,
+        sessionId: session.id,
+        paymentLinkId: session.payment_link || ''
+      });
+      key = r.key;
+    } catch (err) {
+      console.error('sheets error:', err.message);
+      return { statusCode: 500, body: 'Sheets error' };
+    }
+
+    if (!key) {
+      console.warn('warn: no keys available for', { sheetTab });
+      return { statusCode: 200, body: 'No keys available' };
+    }
+    console.log('ok: got key', { product, sheetTab, keyPreview: String(key).slice(0, 4) + '...' });
+
+    // Upsert in MailerLite (best effort)
+    try {
+      const ok = await upsertMailerLite({ email, product, key });
+      if (!ok) console.warn('warn: mailerlite upsert not ok');
+    } catch (err) {
+      console.error('mailerlite error:', err.message);
+    }
+
+    // TikTok + Meta (best effort)
+    try {
+      const ip = await lookupMailerLiteIp(email); // may be null
+      const url = await getPaymentLinkUrl(session.payment_link);
+      const phone = await getCustomerPhone(session);
+      const ttclid = session?.metadata?.ttclid || null;
+      const ttp = session?.metadata?.ttp || null;
+
+      await sendTikTokEvent({
+        session,
+        email,
+        product,
+        ip,
+        url,
+        phone,
+        ttclid,
+        ttp,
+        contentName: sheetTab
+      });
+
+      const fbc = session?.metadata?.fbc || null;
+      const fbp = session?.metadata?.fbp || null;
+      await sendMetaPurchase({
+        session,
+        email,
+        product,
+        ip,
+        url,
+        phone,
+        fbc,
+        fbp,
+        contentName: sheetTab
+      });
+    } catch (err) {
+      console.error('tiktok/meta error:', err.message);
+    }
+
+    console.log('ok: fulfillment complete');
+    return { statusCode: 200, body: 'OK' };
+
   } catch (err) {
+    // Handle bail with side effects
+    if (err instanceof BailError) {
+      console.warn('bailed: single-language language resolution failed');
+      try {
+        await appendBailedEmailToSheet(email);
+      } catch {}
+      try {
+        await notifyBailAdmin({ buyerEmail: email });
+      } catch {}
+      return { statusCode: 200, body: 'Bailed' };
+    }
+
     console.error('routing error:', err.message);
-    // Do not fulfill with a wrong language
     return { statusCode: 200, body: 'Language not recognized for single-language link' };
   }
-
-  const sheetTab = SHEET_TAB_BY_PRODUCT[product];
-  console.log('routing decision', { product, sheetTab });
-  if (!sheetTab) {
-    console.warn('warn: unknown product', { product });
-    return { statusCode: 200, body: 'Unknown product' };
-  }
-
-  // Assign key
-  let key;
-  try {
-    const r = await findAndAssignKey({
-      sheetTab,
-      email,
-      sessionId: session.id,
-      paymentLinkId: session.payment_link || ''
-    });
-    key = r.key;
-  } catch (err) {
-    console.error('sheets error:', err.message);
-    return { statusCode: 500, body: 'Sheets error' };
-  }
-
-  if (!key) {
-    console.warn('warn: no keys available for', { sheetTab });
-    return { statusCode: 200, body: 'No keys available' };
-  }
-  console.log('ok: got key', { product, sheetTab, keyPreview: String(key).slice(0, 4) + '...' });
-
-  // Upsert in MailerLite (best effort)
-  try {
-    const ok = await upsertMailerLite({ email, product, key });
-    if (!ok) console.warn('warn: mailerlite upsert not ok');
-  } catch (err) {
-    console.error('mailerlite error:', err.message);
-  }
-
-  // TikTok + Meta (best effort)
-  try {
-    const ip = await lookupMailerLiteIp(email); // may be null
-    const url = await getPaymentLinkUrl(session.payment_link);
-    const phone = await getCustomerPhone(session);
-    const ttclid = session?.metadata?.ttclid || null;
-    const ttp = session?.metadata?.ttp || null;
-
-    await sendTikTokEvent({
-      session,
-      email,
-      product,
-      ip,
-      url,
-      phone,
-      ttclid,
-      ttp,
-      contentName: sheetTab
-    });
-
-    const fbc = session?.metadata?.fbc || null;
-    const fbp = session?.metadata?.fbp || null;
-    await sendMetaPurchase({
-      session,
-      email,
-      product,
-      ip,
-      url,
-      phone,
-      fbc,
-      fbp,
-      contentName: sheetTab
-    });
-  } catch (err) {
-    console.error('tiktok/meta error:', err.message);
-  }
-
-  console.log('ok: fulfillment complete');
-  return { statusCode: 200, body: 'OK' };
 };
