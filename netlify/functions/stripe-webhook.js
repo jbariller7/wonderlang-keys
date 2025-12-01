@@ -44,27 +44,48 @@ const ML_BAILED_GROUP_ID = '158395915765286796';
 // --- Payment Link mapping (live + test)
 const PAYMENT_LINK = {
   SINGLE_LANGUAGE: [
-    'plink_1RoKYZBFbQoDa6p0hCPS3d2g', 'plink_1Rzg6lBFbQoDa6p0bmGphygN', 'plink_1RvKx8BFbQoDa6p0PaVih8U5'
+    'plink_1RoKYZBFbQoDa6p0hCPS3d2g',
+    'plink_1Rzg6lBFbQoDa6p0bmGphygN',
+    'plink_1RvKx8BFbQoDa6p0PaVih8U5'
   ],
   POLYGLOT_STEAM: [
-    'plink_1RoLRRBFbQoDa6p0g9zXIJaM', 'plink_1Rzg0NBFbQoDa6p0fL5aVAsU', 'plink_1RvL4VBFbQoDa6p09A00tNAR'
+    'plink_1RoLRRBFbQoDa6p0g9zXIJaM',
+    'plink_1Rzg0NBFbQoDa6p0fL5aVAsU',
+    'plink_1RvL4VBFbQoDa6p09A00tNAR'
   ],
   POLYGLOT_ITCH: [
-    'plink_1RoNLzBFbQoDa6p0lvW7lw5f', 'plink_1RoN4QBFbQoDa6p0fQ8Xc3Vs', 'plink_1S2w5eBFbQoDa6p06bwPV6Hp',
-    'plink_1Rzg7fBFbQoDa6p0UCIOzCtk', 'plink_1S2wD2BFbQoDa6p0w2tvZNiG'
+    'plink_1RoNLzBFbQoDa6p0lvW7lw5f',
+    'plink_1RoN4QBFbQoDa6p0fQ8Xc3Vs',
+    'plink_1S2w5eBFbQoDa6p06bwPV6Hp',
+    'plink_1Rzg7fBFbQoDa6p0UCIOzCtk',
+    'plink_1S2wD2BFbQoDa6p0w2tvZNiG'
   ]
 };
 
 // --- Product codes
 const PRODUCT = {
-  FR: 'French', ES: 'Spanish', DE: 'German', PT: 'Portuguese', IT: 'Italian', KO: 'Korean', JA: 'Japanese',
+  FR: 'French',
+  ES: 'Spanish',
+  DE: 'German',
+  PT: 'Portuguese',
+  IT: 'Italian',
+  KO: 'Korean',
+  JA: 'Japanese',
   POLY_STEAM: 'POLY_STEAM',
-  POLY_ITCH: 'POLY_ITCH'
+  POLY_ITCH: 'POLY_ITCH',
+  ZH_PREORDER: 'MandarinPreorder'
 };
 
-const LANGUAGE_TO_PRODUCT = {
-  French: PRODUCT.FR, Spanish: PRODUCT.ES, German: PRODUCT.DE, Portuguese: PRODUCT.PT,
-  Italian: PRODUCT.IT, Korean: PRODUCT.KO, Japanese: PRODUCT.JA
+// We only support these exact language choices from the Stripe custom field.
+const LANGUAGE_VALUE_TO_PRODUCT = {
+  'french': PRODUCT.FR,
+  'spanish': PRODUCT.ES,
+  'german': PRODUCT.DE,
+  'italian': PRODUCT.IT,
+  'portuguese': PRODUCT.PT,
+  'korean': PRODUCT.KO,
+  'japanese': PRODUCT.JA,
+  'mandarin chinese (pre-order)': PRODUCT.ZH_PREORDER
 };
 
 const SHEET_TAB_BY_PRODUCT = {
@@ -76,88 +97,62 @@ const SHEET_TAB_BY_PRODUCT = {
   [PRODUCT.KO]: 'Korean Steam',
   [PRODUCT.JA]: 'Japanese Steam',
   [PRODUCT.POLY_STEAM]: 'Polyglot Steam',
-  [PRODUCT.POLY_ITCH]: 'Polyglot Itch'
+  [PRODUCT.POLY_ITCH]: 'Polyglot Itch',
+  [PRODUCT.ZH_PREORDER]: 'Mandarin'     // your new sheet tab
 };
 
 const inSet = (arr, id) => Array.isArray(arr) && arr.includes(id);
 const LANGUAGE_FIELD_KEY_LC = (LANGUAGE_FIELD_KEY || 'language').toLowerCase();
 
-// --- Robust normalization + aliasing
-function norm(s) {
-  return String(s || '')
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .trim();
+// --- Language helpers, using only the Stripe custom field values
+
+function productFromLanguageValue(value) {
+  if (!value) return null;
+  const key = String(value).trim().toLowerCase();
+  return LANGUAGE_VALUE_TO_PRODUCT[key] || null;
 }
 
-const LANG_ALIASES = {
-  [PRODUCT.FR]: ['fr', 'fra', 'fr-fr', 'french', 'francais', 'français'],
-  [PRODUCT.ES]: ['es', 'spa', 'es-es', 'spanish', 'espanol', 'español', 'castellano'],
-  [PRODUCT.DE]: ['de', 'deu', 'ger', 'de-de', 'german', 'deutsch'],
-  [PRODUCT.PT]: ['pt', 'por', 'pt-pt', 'pt-br', 'portuguese', 'portugues', 'português'],
-  [PRODUCT.IT]: ['it', 'ita', 'it-it', 'italian', 'italiano'],
-  [PRODUCT.KO]: ['ko', 'kor', 'ko-kr', 'korean', 'hangul', 'hangeul', '한국어', '한글', '조선말'],
-  [PRODUCT.JA]: ['ja', 'jpn', 'ja-jp', 'japanese', 'nihongo', 'にほんご', '日本語', 'にっぽんご']
-};
-
-function resolveLanguageToProduct(raw) {
-  const n = norm(raw);
-  if (!n) return null;
-
-  // Alias hits
-  for (const [prod, aliases] of Object.entries(LANG_ALIASES)) {
-    if (aliases.includes(n)) return prod;
+function getLanguageProductFromCustomFields(session) {
+  const cfs = Array.isArray(session.custom_fields) ? session.custom_fields : [];
+  if (!cfs.length) {
+    console.log('lang: no custom_fields on session');
+    return null;
   }
 
-  // Substring hybrids like "Japanese / 日本語"
-  for (const [prod, aliases] of Object.entries(LANG_ALIASES)) {
-    if (aliases.some(a => a.length >= 2 && n.includes(a))) return prod;
+  const fieldKeyLc = LANGUAGE_FIELD_KEY_LC;
+
+  function valueFromField(f) {
+    if (!f) return null;
+    if (f.text && typeof f.text.value !== 'undefined') return f.text.value;
+    if (f.dropdown && typeof f.dropdown.value !== 'undefined') return f.dropdown.value;
+    return null;
   }
 
-  // Exact canonical name
-  if (LANGUAGE_TO_PRODUCT[raw]) return LANGUAGE_TO_PRODUCT[raw];
+  // Prefer the configured key
+  let field = cfs.find(f => String(f.key || '').toLowerCase() === fieldKeyLc);
+  let value = valueFromField(field);
 
-  return null;
-}
-
-function inferFromSessionLocale(locale) {
-  const n = norm(locale);
-  if (!n) return null;
-  if (n.startsWith('fr')) return PRODUCT.FR;
-  if (n.startsWith('es')) return PRODUCT.ES;
-  if (n.startsWith('de')) return PRODUCT.DE;
-  if (n.startsWith('pt')) return PRODUCT.PT;
-  if (n.startsWith('it')) return PRODUCT.IT;
-  if (n.startsWith('ko')) return PRODUCT.KO;
-  if (n.startsWith('ja')) return PRODUCT.JA;
-  return null;
-}
-
-function inferFromNameLike(s) {
-  const n = norm(s);
-  if (!n) return null;
-  if (/japan|nihon|nihongo|日本語|にほんご/.test(n)) return PRODUCT.JA;
-  if (/korea|hangul|hangeul|한국어|한글|조선말/.test(n)) return PRODUCT.KO;
-  if (/french|francais|français/.test(n)) return PRODUCT.FR;
-  if (/spanish|espanol|español|castellano/.test(n)) return PRODUCT.ES;
-  if (/german|deutsch/.test(n)) return PRODUCT.DE;
-  if (/portuguese|portugues|português/.test(n)) return PRODUCT.PT;
-  if (/italian|italiano/.test(n)) return PRODUCT.IT;
-  return null;
-}
-
-function extractAllCustomFieldValues(cfs) {
-  const out = [];
-  if (!Array.isArray(cfs)) return out;
-  for (const f of cfs) {
-    const key = f?.key || null;
-    const label = f?.label || null;
-    const type = f?.type || (f?.text ? 'text' : f?.dropdown ? 'dropdown' : null);
-    const val = (f?.text && f.text.value) || (f?.dropdown && f.dropdown.value) || null;
-    out.push({ key, label, value: val, type });
+  // Fallback: any field whose value matches one of the known labels
+  if (!value) {
+    for (const f of cfs) {
+      const v = valueFromField(f);
+      const p = productFromLanguageValue(v);
+      if (p) {
+        field = f;
+        value = v;
+        break;
+      }
+    }
   }
-  return out;
+
+  const product = productFromLanguageValue(value);
+  console.log('lang from custom_fields', {
+    keys: cfs.map(f => f.key),
+    chosenKey: field ? field.key : null,
+    value,
+    product
+  });
+  return product;
 }
 
 // --- Google Sheets client
@@ -188,6 +183,26 @@ async function appendBailedEmailToSheet(email) {
   }
 }
 
+// Append Mandarin preorder info: email, when, sessionId, paymentLinkId
+async function appendPreorderToSheet({ sheetTab, email, sessionId, paymentLinkId }) {
+  try {
+    const sheets = await getSheets();
+    const when = new Date().toISOString();
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: GOOGLE_SHEETS_ID,
+      range: `${sheetTab}!A:D`,
+      valueInputOption: 'RAW',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: {
+        values: [[email, when, sessionId, paymentLinkId || '']]
+      }
+    });
+    console.log('preorder: appended row', { sheetTab, email });
+  } catch (e) {
+    console.error('preorder: sheet append error', e.message);
+  }
+}
+
 // --- Find/assign key in a tab
 async function findAndAssignKey({ sheetTab, email, sessionId, paymentLinkId }) {
   console.log('sheets: reading tab', sheetTab);
@@ -209,13 +224,22 @@ async function findAndAssignKey({ sheetTab, email, sessionId, paymentLinkId }) {
     }
   }
 
-  // First free row
-  let rowIndex = -1, key = null;
+  // First free row (key present, email empty)
+  let rowIndex = -1;
+  let key = null;
   for (let i = 0; i < rows.length; i++) {
-    const k = rows[i][0], assignedEmail = rows[i][1];
-    if (k && (!assignedEmail || assignedEmail === '')) { rowIndex = i; key = k; break; }
+    const k = rows[i][0];
+    const assignedEmail = rows[i][1];
+    if (k && (!assignedEmail || assignedEmail === '')) {
+      rowIndex = i;
+      key = k;
+      break;
+    }
   }
-  if (!key) { console.warn('sheets: NO FREE KEY in tab', sheetTab); return { key: null }; }
+  if (!key) {
+    console.warn('sheets: NO FREE KEY in tab', sheetTab);
+    return { key: null };
+  }
 
   const when = new Date().toISOString();
   const targetRow = 2 + rowIndex;
@@ -239,6 +263,9 @@ function envList(name) {
 }
 function groupsForProduct(product) {
   const common = envList('ML_GROUPS_ALL');
+
+  // If you want language-specific groups, you can wire ML_GROUPS_FR etc here;
+  // for now, keep the earlier poly-glot logic.
   switch (product) {
     case PRODUCT.FR:
     case PRODUCT.ES:
@@ -260,7 +287,7 @@ async function upsertMailerLite({ email, product, key }) {
   const api = 'https://connect.mailerlite.com/api';
   const groups = groupsForProduct(product);
   const steamKeyField = ML_FIELD_STEAM_KEY || 'steam_key';
-  const itchKeyField  = ML_FIELD_ITCH_KEY  || 'itch_key';
+  const itchKeyField = ML_FIELD_ITCH_KEY || 'itch_key';
   const fields = {};
   if (product === PRODUCT.POLY_ITCH) fields[itchKeyField] = key;
   else fields[steamKeyField] = key;
@@ -279,7 +306,12 @@ async function upsertMailerLite({ email, product, key }) {
   });
 
   const text = await res.text().catch(() => '');
-  console.log('ml: response', { status: res.status, ok: res.ok, len: text.length, preview: text.slice(0, 120) });
+  console.log('ml: response', {
+    status: res.status,
+    ok: res.ok,
+    len: text.length,
+    preview: text.slice(0, 120)
+  });
   return res.ok;
 }
 
@@ -287,9 +319,15 @@ async function upsertMailerLite({ email, product, key }) {
 async function lookupMailerLiteIp(email) {
   if (!MAILERLITE_API_KEY) return null;
   try {
-    const res = await fetch(`https://connect.mailerlite.com/api/subscribers/${encodeURIComponent(email)}`, {
-      headers: { 'Authorization': `Bearer ${MAILERLITE_API_KEY}`, 'Accept': 'application/json' }
-    });
+    const res = await fetch(
+      `https://connect.mailerlite.com/api/subscribers/${encodeURIComponent(email)}`,
+      {
+        headers: {
+          'Authorization': `Bearer ${MAILERLITE_API_KEY}`,
+          'Accept': 'application/json'
+        }
+      }
+    );
     if (!res.ok) return null;
     const json = await res.json();
     const ip = json?.data?.ip_address || json?.data?.optin_ip || null;
@@ -313,17 +351,24 @@ async function notifyBailAdmin({ buyerEmail }) {
       email: ADMIN_EMAIL_FOR_BAIL,
       fields: { bailed_email: buyerEmail }
     };
-    const patch = await fetch(`${api}/subscribers/${encodeURIComponent(ADMIN_EMAIL_FOR_BAIL)}`, {
-      method: 'PATCH',
-      headers: {
-        'Authorization': `Bearer ${MAILERLITE_API_KEY}`,
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-      },
-      body: JSON.stringify(payload)
-    });
+    const patch = await fetch(
+      `${api}/subscribers/${encodeURIComponent(ADMIN_EMAIL_FOR_BAIL)}`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${MAILERLITE_API_KEY}`,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify(payload)
+      }
+    );
     const ptxt = await patch.text().catch(() => '');
-    console.log('bailed: ML admin patch', { status: patch.status, ok: patch.ok, preview: ptxt.slice(0, 120) });
+    console.log('bailed: ML admin patch', {
+      status: patch.status,
+      ok: patch.ok,
+      preview: ptxt.slice(0, 120)
+    });
 
     // 2) Add admin to the bail group so your automation triggers
     const add = await fetch(`${api}/groups/${ML_BAILED_GROUP_ID}/subscribers`, {
@@ -336,7 +381,11 @@ async function notifyBailAdmin({ buyerEmail }) {
       body: JSON.stringify({ email: ADMIN_EMAIL_FOR_BAIL })
     });
     const atxt = await add.text().catch(() => '');
-    console.log('bailed: ML add-to-group', { status: add.status, ok: add.ok, preview: atxt.slice(0, 120) });
+    console.log('bailed: ML add-to-group', {
+      status: add.status,
+      ok: add.ok,
+      preview: atxt.slice(0, 120)
+    });
   } catch (e) {
     console.error('bailed: ML notify error', e.message);
   }
@@ -344,18 +393,36 @@ async function notifyBailAdmin({ buyerEmail }) {
 
 const META_ENDPOINT = (pixel) => `https://graph.facebook.com/v20.0/${pixel}/events`;
 
-function cleanForHash(s) { return String(s || '').trim(); }
+function cleanForHash(s) {
+  return String(s || '').trim();
+}
 function sha256LowerRaw(s) {
-  return crypto.createHash('sha256').update(cleanForHash(s).toLowerCase()).digest('hex');
+  return crypto
+    .createHash('sha256')
+    .update(cleanForHash(s).toLowerCase())
+    .digest('hex');
 }
 
-async function sendMetaPurchase({ session, email, product, ip, url, phone, fbc, fbp, contentName }) {
+async function sendMetaPurchase({
+  session,
+  email,
+  product,
+  ip,
+  url,
+  phone,
+  fbc,
+  fbp,
+  contentName
+}) {
   if (!META_PIXEL || !META_ACCESS_TOKEN) {
     console.log('meta: missing token or pixel; skipping');
     return false;
   }
-  const sessionTotal = typeof session.amount_total === 'number' ? session.amount_total / 100 : null;
-  const { unitPrice, currency: liCurrency, name: liName } = await getLineItemInfo(session.id);
+  const sessionTotal =
+    typeof session.amount_total === 'number' ? session.amount_total / 100 : null;
+  const { unitPrice, currency: liCurrency, name: liName } = await getLineItemInfo(
+    session.id
+  );
   const value = sessionTotal ?? unitPrice ?? 15;
   const currency = (session.currency || liCurrency || 'USD').toUpperCase();
   const price = unitPrice ?? value;
@@ -364,7 +431,9 @@ async function sendMetaPurchase({ session, email, product, ip, url, phone, fbc, 
   const user_data = {
     em: sha256LowerRaw(email),
     ph: phone ? sha256LowerRaw(phone) : undefined,
-    external_id: session.customer ? sha256LowerRaw(session.customer) : undefined,
+    external_id: session.customer
+      ? sha256LowerRaw(session.customer)
+      : undefined,
     client_ip_address: ip || undefined,
     fbp: fbp || undefined,
     fbc: fbc || undefined
@@ -400,14 +469,24 @@ async function sendMetaPurchase({ session, email, product, ip, url, phone, fbc, 
     has_fbc: !!user_data.fbc
   });
 
-  const res = await fetch(`${META_ENDPOINT(META_PIXEL)}?access_token=${encodeURIComponent(META_ACCESS_TOKEN)}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-    body: JSON.stringify(body)
-  });
+  const res = await fetch(
+    `${META_ENDPOINT(META_PIXEL)}?access_token=${encodeURIComponent(
+      META_ACCESS_TOKEN
+    )}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify(body)
+    }
+  );
 
   const text = await res.text().catch(() => '');
-  console.log('meta: response', { status: res.status, ok: res.ok, len: text.length, preview: text.slice(0, 200) });
+  console.log('meta: response', {
+    status: res.status,
+    ok: res.ok,
+    len: text.length,
+    preview: text.slice(0, 200)
+  });
   return res.ok;
 }
 
@@ -420,9 +499,12 @@ async function getLineItemInfo(sessionId) {
     });
     const item = li?.data?.[0];
     if (!item) return {};
-    const unitPrice = typeof item.amount_total === 'number'
-      ? item.amount_total / 100
-      : (item.price?.unit_amount ? item.price.unit_amount / 100 : null);
+    const unitPrice =
+      typeof item.amount_total === 'number'
+        ? item.amount_total / 100
+        : item.price?.unit_amount
+        ? item.price.unit_amount / 100
+        : null;
     const currency = (item.currency || '').toUpperCase() || null;
     const name = item.description || item.price?.product?.name || null;
     return { unitPrice, currency, name };
@@ -457,19 +539,36 @@ async function getCustomerPhone(session) {
 
 // --- TikTok Events API
 const TIKTOK_TOKEN = TIKTOK_ACCESS_TOKEN || TIKTOK_API_KEY;
-const TIKTOK_ENDPOINT = 'https://business-api.tiktok.com/open_api/v1.3/event/track/';
+const TIKTOK_ENDPOINT =
+  'https://business-api.tiktok.com/open_api/v1.3/event/track/';
 function sha256Lower(s) {
-  return crypto.createHash('sha256').update(String(s || '').trim().toLowerCase()).digest('hex');
+  return crypto
+    .createHash('sha256')
+    .update(String(s || '').trim().toLowerCase())
+    .digest('hex');
 }
 
-async function sendTikTokEvent({ session, email, product, ip, url, phone, ttclid, ttp, contentName }) {
+async function sendTikTokEvent({
+  session,
+  email,
+  product,
+  ip,
+  url,
+  phone,
+  ttclid,
+  ttp,
+  contentName
+}) {
   if (!TIKTOK_TOKEN || !TIKTOK_PIXEL) {
     console.log('tiktok: missing token or pixel; skipping');
     return false;
   }
 
-  const sessionTotal = typeof session.amount_total === 'number' ? session.amount_total / 100 : null;
-  const { unitPrice, currency: liCurrency, name: liName } = await getLineItemInfo(session.id);
+  const sessionTotal =
+    typeof session.amount_total === 'number' ? session.amount_total / 100 : null;
+  const { unitPrice, currency: liCurrency, name: liName } = await getLineItemInfo(
+    session.id
+  );
   const value = sessionTotal ?? unitPrice ?? 15;
   const currency = (session.currency || liCurrency || 'USD').toUpperCase();
   const price = unitPrice ?? value;
@@ -495,13 +594,15 @@ async function sendTikTokEvent({ session, email, product, ip, url, phone, ttclid
       content_name: contentNameFinal,
       price,
       url: url || undefined,
-      contents: [{
-        content_id: product,
-        content_type: 'product',
-        content_name: contentNameFinal,
-        price,
-        quantity: 1
-      }]
+      contents: [
+        {
+          content_id: product,
+          content_type: 'product',
+          content_name: contentNameFinal,
+          price,
+          quantity: 1
+        }
+      ]
     }
   };
 
@@ -535,7 +636,12 @@ async function sendTikTokEvent({ session, email, product, ip, url, phone, ttclid
   });
 
   const text = await res.text().catch(() => '');
-  console.log('tiktok: response', { status: res.status, ok: res.ok, len: text.length, preview: text.slice(0, 200) });
+  console.log('tiktok: response', {
+    status: res.status,
+    ok: res.ok,
+    len: text.length,
+    preview: text.slice(0, 200)
+  });
   return res.ok;
 }
 
@@ -548,55 +654,27 @@ class BailError extends Error {
   }
 }
 
-// --- Robust product routing
+// --- Robust product routing using only the Stripe custom field values
 async function productFromSession(session) {
   const pl = session.payment_link;
-  const cfs = Array.isArray(session.custom_fields) ? session.custom_fields : [];
-  const allFields = extractAllCustomFieldValues(cfs);
+  const langProduct = getLanguageProductFromCustomFields(session);
 
-  // 1) Explicit metadata first
-  const metaLang = session?.metadata?.language || session?.metadata?.lang || null;
-  let resolved = resolveLanguageToProduct(metaLang);
-
-  // 2) Custom field by configured key
-  if (!resolved && allFields.length) {
-    const byKey = allFields.find(f => String(f.key || '').toLowerCase() === LANGUAGE_FIELD_KEY_LC);
-    if (byKey) resolved = resolveLanguageToProduct(byKey.value);
-    console.log('lang via custom_field by key', { key: byKey?.key || null, value: byKey?.value || null, resolved });
+  // If user explicitly selected Mandarin preorder on any payment link, that wins.
+  if (langProduct === PRODUCT.ZH_PREORDER) {
+    console.log('route: MANDARIN PREORDER', { payment_link: pl });
+    return PRODUCT.ZH_PREORDER;
   }
 
-  // 3) Scan every custom field
-  if (!resolved && allFields.length) {
-    for (const f of allFields) {
-      const r = resolveLanguageToProduct(f.value);
-      if (r) { resolved = r; break; }
-    }
-    console.log('lang via any custom_field', { fields: allFields, resolved });
-  }
-
-  // 4) Fallback to line item name
-  if (!resolved) {
-    try {
-      const { name } = await getLineItemInfo(session.id);
-      resolved = inferFromNameLike(name);
-      if (resolved) console.log('lang via line item name', { name, resolved });
-    } catch {}
-  }
-
-  // 5) Fallback to session.locale
-  if (!resolved) {
-    resolved = inferFromSessionLocale(session?.locale);
-    if (resolved) console.log('lang via session.locale', { locale: session?.locale, resolved });
-  }
-
-  // Routing decisions
+  // Single language Steam key links must have a language selection.
   if (inSet(PAYMENT_LINK.SINGLE_LANGUAGE, pl)) {
-    console.log('route: SINGLE_LANGUAGE', { payment_link: pl, resolved, allFields, metaLang });
-    if (!resolved) {
-      throw new BailError('Language selection missing or unrecognized for SINGLE_LANGUAGE', null);
+    console.log('route: SINGLE_LANGUAGE', { payment_link: pl, langProduct });
+    if (!langProduct) {
+      throw new BailError('Language selection missing for SINGLE_LANGUAGE', null);
     }
-    return resolved;
+    return langProduct;
   }
+
+  // Polyglot links ignore language, except Mandarin preorder already handled.
   if (inSet(PAYMENT_LINK.POLYGLOT_STEAM, pl)) {
     console.log('route: POLYGLOT_STEAM', { payment_link: pl });
     return PRODUCT.POLY_STEAM;
@@ -606,8 +684,9 @@ async function productFromSession(session) {
     return PRODUCT.POLY_ITCH;
   }
 
-  console.log('route: DEFAULT (no payment_link match)', { payment_link: pl, resolved });
-  return resolved || PRODUCT.POLY_STEAM;
+  // Unknown payment link: fall back to language selection if any, otherwise poly steam.
+  console.log('route: DEFAULT', { payment_link: pl, langProduct });
+  return langProduct || PRODUCT.POLY_STEAM;
 }
 
 // --- Main handler
@@ -625,20 +704,35 @@ exports.handler = async (event) => {
   console.log('dbg sig present:', !!sig, 'len:', sig ? sig.length : 0);
   console.log('dbg isBase64Encoded:', !!event.isBase64Encoded);
   console.log('dbg body prefix:', (event.body || '').slice(0, 60));
-  console.log('dbg whsec prefix:', (process.env.STRIPE_WEBHOOK_SECRET || '').slice(0, 6));
+  console.log(
+    'dbg whsec prefix:',
+    (process.env.STRIPE_WEBHOOK_SECRET || '').slice(0, 6)
+  );
 
   let stripeEvent;
   try {
-    stripeEvent = stripe.webhooks.constructEvent(event.body, sig, STRIPE_WEBHOOK_SECRET);
+    // If your Netlify site sends base64 bodies, you may need:
+    // const body = event.isBase64Encoded ? Buffer.from(event.body, 'base64').toString('utf8') : event.body;
+    // stripeEvent = stripe.webhooks.constructEvent(body, sig, STRIPE_WEBHOOK_SECRET);
+    stripeEvent = stripe.webhooks.constructEvent(
+      event.body,
+      sig,
+      STRIPE_WEBHOOK_SECRET
+    );
   } catch (err) {
     console.error('sig fail:', err.message);
-    return { statusCode: 400, body: `Webhook signature verification failed: ${err.message}` };
+    return {
+      statusCode: 400,
+      body: `Webhook signature verification failed: ${err.message}`
+    };
   }
 
   console.log('ok: event verified', { id: stripeEvent.id, type: stripeEvent.type });
 
-  if (stripeEvent.type !== 'checkout.session.completed' &&
-      stripeEvent.type !== 'checkout.session.async_payment_succeeded') {
+  if (
+    stripeEvent.type !== 'checkout.session.completed' &&
+    stripeEvent.type !== 'checkout.session.async_payment_succeeded'
+  ) {
     console.log('info: ignored event type', stripeEvent.type);
     return { statusCode: 200, body: 'Ignored' };
   }
@@ -658,7 +752,8 @@ exports.handler = async (event) => {
     return { statusCode: 200, body: 'Not paid yet' };
   }
 
-  const email = session?.customer_details?.email || session?.customer_email || null;
+  const email =
+    session?.customer_details?.email || session?.customer_email || null;
   if (!email) {
     console.warn('warn: no email in session');
     return { statusCode: 200, body: 'No email in session' };
@@ -674,36 +769,57 @@ exports.handler = async (event) => {
       return { statusCode: 200, body: 'Unknown product' };
     }
 
-    // Assign key
-    let key;
-    try {
-      const r = await findAndAssignKey({
+    // Special case - Mandarin pre-order:
+    // just log the order in the "Mandarin" sheet and do not assign keys or touch MailerLite.
+    if (product === PRODUCT.ZH_PREORDER) {
+      try {
+        await appendPreorderToSheet({
+          sheetTab,
+          email,
+          sessionId: session.id,
+          paymentLinkId: session.payment_link || ''
+        });
+        console.log('ok: Mandarin pre-order recorded');
+      } catch (err) {
+        console.error('preorder sheet error:', err.message);
+        return { statusCode: 500, body: 'Preorder sheet error' };
+      }
+    } else {
+      // Normal products - assign a key and sync with MailerLite.
+      let key;
+      try {
+        const r = await findAndAssignKey({
+          sheetTab,
+          email,
+          sessionId: session.id,
+          paymentLinkId: session.payment_link || ''
+        });
+        key = r.key;
+      } catch (err) {
+        console.error('sheets error:', err.message);
+        return { statusCode: 500, body: 'Sheets error' };
+      }
+
+      if (!key) {
+        console.warn('warn: no keys available for', { sheetTab });
+        return { statusCode: 200, body: 'No keys available' };
+      }
+      console.log('ok: got key', {
+        product,
         sheetTab,
-        email,
-        sessionId: session.id,
-        paymentLinkId: session.payment_link || ''
+        keyPreview: String(key).slice(0, 4) + '...'
       });
-      key = r.key;
-    } catch (err) {
-      console.error('sheets error:', err.message);
-      return { statusCode: 500, body: 'Sheets error' };
+
+      // Upsert in MailerLite (best effort) - skip only for Mandarin pre-orders (already handled).
+      try {
+        const okMl = await upsertMailerLite({ email, product, key });
+        if (!okMl) console.warn('warn: mailerlite upsert not ok');
+      } catch (err) {
+        console.error('mailerlite error:', err.message);
+      }
     }
 
-    if (!key) {
-      console.warn('warn: no keys available for', { sheetTab });
-      return { statusCode: 200, body: 'No keys available' };
-    }
-    console.log('ok: got key', { product, sheetTab, keyPreview: String(key).slice(0, 4) + '...' });
-
-    // Upsert in MailerLite (best effort)
-    try {
-      const ok = await upsertMailerLite({ email, product, key });
-      if (!ok) console.warn('warn: mailerlite upsert not ok');
-    } catch (err) {
-      console.error('mailerlite error:', err.message);
-    }
-
-    // TikTok + Meta (best effort)
+    // TikTok + Meta (best effort) - still run for all products, including pre-orders.
     try {
       const ip = await lookupMailerLiteIp(email); // may be null
       const url = await getPaymentLinkUrl(session.payment_link);
@@ -742,7 +858,6 @@ exports.handler = async (event) => {
 
     console.log('ok: fulfillment complete');
     return { statusCode: 200, body: 'OK' };
-
   } catch (err) {
     // Handle bail with side effects
     if (err instanceof BailError) {
@@ -757,6 +872,9 @@ exports.handler = async (event) => {
     }
 
     console.error('routing error:', err.message);
-    return { statusCode: 200, body: 'Language not recognized for single-language link' };
+    return {
+      statusCode: 200,
+      body: 'Language not recognized for single-language link'
+    };
   }
 };
