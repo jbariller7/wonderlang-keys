@@ -73,19 +73,29 @@ const PRODUCT = {
   JA: 'Japanese',
   POLY_STEAM: 'POLY_STEAM',
   POLY_ITCH: 'POLY_ITCH',
-  ZH_PREORDER: 'MandarinPreorder'
+  ZH_PREORDER: 'MandarinPreorder',
+  EN_PREORDER: 'EnglishPreorder'
 };
 
-// We only support these exact language choices from the Stripe custom field.
+// Helper to normalize language strings
+function normalizeLangString(s) {
+  return String(s || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' '); // collapse whitespace
+}
+
+// Map of normalized language strings to products
 const LANGUAGE_VALUE_TO_PRODUCT = {
-  'french': PRODUCT.FR,
-  'spanish': PRODUCT.ES,
-  'german': PRODUCT.DE,
-  'italian': PRODUCT.IT,
-  'portuguese': PRODUCT.PT,
-  'korean': PRODUCT.KO,
-  'japanese': PRODUCT.JA,
-  'mandarin chinese (pre-order)': PRODUCT.ZH_PREORDER
+  [normalizeLangString('French')]: PRODUCT.FR,
+  [normalizeLangString('Spanish')]: PRODUCT.ES,
+  [normalizeLangString('German')]: PRODUCT.DE,
+  [normalizeLangString('Italian')]: PRODUCT.IT,
+  [normalizeLangString('Portuguese')]: PRODUCT.PT,
+  [normalizeLangString('Korean')]: PRODUCT.KO,
+  [normalizeLangString('Japanese')]: PRODUCT.JA,
+  [normalizeLangString('Mandarin Chinese (Pre-Order)')]: PRODUCT.ZH_PREORDER,
+  [normalizeLangString('English (Pre-Order)')]: PRODUCT.EN_PREORDER
 };
 
 const SHEET_TAB_BY_PRODUCT = {
@@ -98,18 +108,76 @@ const SHEET_TAB_BY_PRODUCT = {
   [PRODUCT.JA]: 'Japanese Steam',
   [PRODUCT.POLY_STEAM]: 'Polyglot Steam',
   [PRODUCT.POLY_ITCH]: 'Polyglot Itch',
-  [PRODUCT.ZH_PREORDER]: 'Mandarin'     // your new sheet tab
+  [PRODUCT.ZH_PREORDER]: 'Mandarin',
+  [PRODUCT.EN_PREORDER]: 'English'
 };
 
 const inSet = (arr, id) => Array.isArray(arr) && arr.includes(id);
-const LANGUAGE_FIELD_KEY_LC = (LANGUAGE_FIELD_KEY || 'language').toLowerCase();
 
-// --- Language helpers, using only the Stripe custom field values
+// --- Language helpers
 
 function productFromLanguageValue(value) {
   if (!value) return null;
-  const key = String(value).trim().toLowerCase();
-  return LANGUAGE_VALUE_TO_PRODUCT[key] || null;
+  const key = normalizeLangString(value);
+
+  // Exact match on our normalized map
+  if (LANGUAGE_VALUE_TO_PRODUCT[key]) {
+    return LANGUAGE_VALUE_TO_PRODUCT[key];
+  }
+
+  // Extra safety: match on substrings in case Stripe appends or alters tokens
+  if (key.includes('french')) return PRODUCT.FR;
+  if (key.includes('spanish')) return PRODUCT.ES;
+  if (key.includes('german')) return PRODUCT.DE;
+  if (key.includes('italian')) return PRODUCT.IT;
+  if (key.includes('portuguese')) return PRODUCT.PT;
+  if (key.includes('korean')) return PRODUCT.KO;
+  if (key.includes('japanese')) return PRODUCT.JA;
+  if (key.includes('mandarin') || key.includes('chinese')) return PRODUCT.ZH_PREORDER;
+  if (key.includes('english') && key.includes('pre-order')) return PRODUCT.EN_PREORDER;
+
+  return null;
+}
+
+function extractLanguageFromField(f) {
+  if (!f) return null;
+  const candidates = [];
+
+  // Text field
+  if (f.text && typeof f.text.value !== 'undefined' && f.text.value !== null) {
+    candidates.push(f.text.value);
+  }
+
+  // Dropdown field: selected value plus all option labels and values
+  if (f.dropdown) {
+    if (typeof f.dropdown.value !== 'undefined' && f.dropdown.value !== null) {
+      candidates.push(f.dropdown.value);
+    }
+
+    if (Array.isArray(f.dropdown.options)) {
+      for (const opt of f.dropdown.options) {
+        if (typeof opt.value !== 'undefined' && opt.value !== null) {
+          candidates.push(opt.value);
+        }
+        if (typeof opt.label !== 'undefined' && opt.label !== null) {
+          candidates.push(opt.label);
+        }
+      }
+    }
+  }
+
+  // Last resort: some integrations might store a plain value at top level
+  if (typeof f.value !== 'undefined' && f.value !== null) {
+    candidates.push(f.value);
+  }
+
+  for (const c of candidates) {
+    const p = productFromLanguageValue(c);
+    if (p) {
+      return { product: p, rawValue: c };
+    }
+  }
+  return null;
 }
 
 function getLanguageProductFromCustomFields(session) {
@@ -119,40 +187,42 @@ function getLanguageProductFromCustomFields(session) {
     return null;
   }
 
-  const fieldKeyLc = LANGUAGE_FIELD_KEY_LC;
+  const normalizeKey = (s) =>
+    String(s || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+  const configuredKeyNorm = normalizeKey(LANGUAGE_FIELD_KEY || 'language');
 
-  function valueFromField(f) {
-    if (!f) return null;
-    if (f.text && typeof f.text.value !== 'undefined') return f.text.value;
-    if (f.dropdown && typeof f.dropdown.value !== 'undefined') return f.dropdown.value;
-    return null;
-  }
+  let chosen = null;
 
-  // Prefer the configured key
-  let field = cfs.find(f => String(f.key || '').toLowerCase() === fieldKeyLc);
-  let value = valueFromField(field);
-
-  // Fallback: any field whose value matches one of the known labels
-  if (!value) {
-    for (const f of cfs) {
-      const v = valueFromField(f);
-      const p = productFromLanguageValue(v);
-      if (p) {
-        field = f;
-        value = v;
+  // 1) Prefer the configured key if we find a matching field
+  for (const f of cfs) {
+    if (normalizeKey(f.key) === configuredKeyNorm) {
+      const got = extractLanguageFromField(f);
+      if (got) {
+        chosen = { field: f, ...got };
         break;
       }
     }
   }
 
-  const product = productFromLanguageValue(value);
+  // 2) Fallback: try all fields in order for a recognizable language string
+  if (!chosen) {
+    for (const f of cfs) {
+      const got = extractLanguageFromField(f);
+      if (got) {
+        chosen = { field: f, ...got };
+        break;
+      }
+    }
+  }
+
   console.log('lang from custom_fields', {
     keys: cfs.map(f => f.key),
-    chosenKey: field ? field.key : null,
-    value,
-    product
+    chosenKey: chosen && chosen.field ? chosen.field.key : null,
+    rawValue: chosen ? chosen.rawValue : null,
+    product: chosen ? chosen.product : null
   });
-  return product;
+
+  return chosen ? chosen.product : null;
 }
 
 // --- Google Sheets client
@@ -183,7 +253,7 @@ async function appendBailedEmailToSheet(email) {
   }
 }
 
-// Append Mandarin preorder info: email, when, sessionId, paymentLinkId
+// Append preorder info: email, when, sessionId, paymentLinkId
 async function appendPreorderToSheet({ sheetTab, email, sessionId, paymentLinkId }) {
   try {
     const sheets = await getSheets();
@@ -214,7 +284,7 @@ async function findAndAssignKey({ sheetTab, email, sessionId, paymentLinkId }) {
   const rows = res.data.values || [];
   console.log('sheets: rows read', rows.length);
 
-  // Idempotency
+  // Idempotency: if session already recorded, reuse its key
   for (let i = 0; i < rows.length; i++) {
     const existingSession = rows[i][3];
     if (existingSession === sessionId) {
@@ -261,11 +331,11 @@ function envList(name) {
   const v = process.env[name];
   return v ? v.split(',').map(s => s.trim()).filter(Boolean) : [];
 }
+
 function groupsForProduct(product) {
   const common = envList('ML_GROUPS_ALL');
 
-  // If you want language-specific groups, you can wire ML_GROUPS_FR etc here;
-  // for now, keep the earlier poly-glot logic.
+  // If you want language specific groups, you can wire ML_GROUPS_FR etc here
   switch (product) {
     case PRODUCT.FR:
     case PRODUCT.ES:
@@ -391,11 +461,14 @@ async function notifyBailAdmin({ buyerEmail }) {
   }
 }
 
+// --- Meta (Facebook) helpers
+
 const META_ENDPOINT = (pixel) => `https://graph.facebook.com/v20.0/${pixel}/events`;
 
 function cleanForHash(s) {
   return String(s || '').trim();
 }
+
 function sha256LowerRaw(s) {
   return crypto
     .createHash('sha256')
@@ -491,6 +564,7 @@ async function sendMetaPurchase({
 }
 
 // --- Stripe helpers
+
 async function getLineItemInfo(sessionId) {
   try {
     const li = await stripe.checkout.sessions.listLineItems(sessionId, {
@@ -513,6 +587,7 @@ async function getLineItemInfo(sessionId) {
     return {};
   }
 }
+
 async function getPaymentLinkUrl(paymentLinkId) {
   if (!paymentLinkId) return null;
   try {
@@ -523,6 +598,7 @@ async function getPaymentLinkUrl(paymentLinkId) {
     return null;
   }
 }
+
 async function getCustomerPhone(session) {
   const phone = session?.customer_details?.phone || null;
   if (phone) return phone;
@@ -538,9 +614,11 @@ async function getCustomerPhone(session) {
 }
 
 // --- TikTok Events API
+
 const TIKTOK_TOKEN = TIKTOK_ACCESS_TOKEN || TIKTOK_API_KEY;
 const TIKTOK_ENDPOINT =
   'https://business-api.tiktok.com/open_api/v1.3/event/track/';
+
 function sha256Lower(s) {
   return crypto
     .createHash('sha256')
@@ -646,6 +724,7 @@ async function sendTikTokEvent({
 }
 
 // --- Bail error class
+
 class BailError extends Error {
   constructor(message, buyerEmail) {
     super(message);
@@ -654,15 +733,16 @@ class BailError extends Error {
   }
 }
 
-// --- Robust product routing using only the Stripe custom field values
+// --- Robust product routing using language custom field
+
 async function productFromSession(session) {
   const pl = session.payment_link;
   const langProduct = getLanguageProductFromCustomFields(session);
 
-  // If user explicitly selected Mandarin preorder on any payment link, that wins.
-  if (langProduct === PRODUCT.ZH_PREORDER) {
-    console.log('route: MANDARIN PREORDER', { payment_link: pl });
-    return PRODUCT.ZH_PREORDER;
+  // If user explicitly selected any preorder language, that wins.
+  if (langProduct === PRODUCT.ZH_PREORDER || langProduct === PRODUCT.EN_PREORDER) {
+    console.log('route: PREORDER', { payment_link: pl, langProduct });
+    return langProduct;
   }
 
   // Single language Steam key links must have a language selection.
@@ -674,7 +754,7 @@ async function productFromSession(session) {
     return langProduct;
   }
 
-  // Polyglot links ignore language, except Mandarin preorder already handled.
+  // Polyglot links ignore language, except preorders already handled.
   if (inSet(PAYMENT_LINK.POLYGLOT_STEAM, pl)) {
     console.log('route: POLYGLOT_STEAM', { payment_link: pl });
     return PRODUCT.POLY_STEAM;
@@ -690,6 +770,7 @@ async function productFromSession(session) {
 }
 
 // --- Main handler
+
 exports.handler = async (event) => {
   if (event.httpMethod !== 'POST') {
     return { statusCode: 405, body: 'Method Not Allowed' };
@@ -761,17 +842,17 @@ exports.handler = async (event) => {
 
   try {
     const product = await productFromSession(session);
-
     const sheetTab = SHEET_TAB_BY_PRODUCT[product];
     console.log('routing decision', { product, sheetTab });
+
     if (!sheetTab) {
       console.warn('warn: unknown product', { product });
       return { statusCode: 200, body: 'Unknown product' };
     }
 
-    // Special case - Mandarin pre-order:
-    // just log the order in the "Mandarin" sheet and do not assign keys or touch MailerLite.
-    if (product === PRODUCT.ZH_PREORDER) {
+    // Special case – Mandarin and English pre orders:
+    // just log the order in the language sheet and do not assign keys or touch MailerLite.
+    if (product === PRODUCT.ZH_PREORDER || product === PRODUCT.EN_PREORDER) {
       try {
         await appendPreorderToSheet({
           sheetTab,
@@ -779,13 +860,13 @@ exports.handler = async (event) => {
           sessionId: session.id,
           paymentLinkId: session.payment_link || ''
         });
-        console.log('ok: Mandarin pre-order recorded');
+        console.log('ok: preorder recorded', { product, sheetTab });
       } catch (err) {
         console.error('preorder sheet error:', err.message);
         return { statusCode: 500, body: 'Preorder sheet error' };
       }
     } else {
-      // Normal products - assign a key and sync with MailerLite.
+      // Normal products: assign a key and sync with MailerLite.
       let key;
       try {
         const r = await findAndAssignKey({
@@ -810,7 +891,7 @@ exports.handler = async (event) => {
         keyPreview: String(key).slice(0, 4) + '...'
       });
 
-      // Upsert in MailerLite (best effort) - skip only for Mandarin pre-orders (already handled).
+      // Upsert in MailerLite (best effort).
       try {
         const okMl = await upsertMailerLite({ email, product, key });
         if (!okMl) console.warn('warn: mailerlite upsert not ok');
@@ -819,7 +900,7 @@ exports.handler = async (event) => {
       }
     }
 
-    // TikTok + Meta (best effort) - still run for all products, including pre-orders.
+    // TikTok + Meta (best effort) for all products, including pre orders.
     try {
       const ip = await lookupMailerLiteIp(email); // may be null
       const url = await getPaymentLinkUrl(session.payment_link);
