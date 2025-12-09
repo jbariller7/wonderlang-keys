@@ -17,8 +17,15 @@ const {
   ML_FIELD_STEAM_KEY,
   ML_FIELD_ITCH_KEY,
   ML_GROUPS_ALL,
-  ML_GROUPS_FR, ML_GROUPS_ES, ML_GROUPS_DE, ML_GROUPS_PT, ML_GROUPS_IT, ML_GROUPS_KO, ML_GROUPS_JA,
-  ML_GROUPS_POLY_STEAM, ML_GROUPS_POLY_ITCH,
+  ML_GROUPS_FR,
+  ML_GROUPS_ES,
+  ML_GROUPS_DE,
+  ML_GROUPS_PT,
+  ML_GROUPS_IT,
+  ML_GROUPS_KO,
+  ML_GROUPS_JA,
+  ML_GROUPS_POLY_STEAM,
+  ML_GROUPS_POLY_ITCH,
 
   // TikTok
   TIKTOK_API_KEY,
@@ -28,6 +35,10 @@ const {
 
   // Optional Stripe custom field "key" for language
   LANGUAGE_FIELD_KEY,
+
+  // Optional Stripe custom field "key" for play mode
+  // (the dropdown "How do you want to play the game?")
+  PLAY_MODE_FIELD_KEY,
 
   // Meta
   META_PIXEL,
@@ -42,18 +53,19 @@ const ADMIN_EMAIL_FOR_BAIL = 'wonderlang.thegame@gmail.com';
 const ML_BAILED_GROUP_ID = '158395915765286796';
 
 // --- Payment Link mapping (live + test)
+// SINGLE_LANGUAGE: the "single language" offer (with language selector).
+// POLYGLOT: any "polyglot" offer.
+// All links here are routed using the play mode custom field.
 const PAYMENT_LINK = {
   SINGLE_LANGUAGE: [
     'plink_1RoKYZBFbQoDa6p0hCPS3d2g',
     'plink_1Rzg6lBFbQoDa6p0bmGphygN',
     'plink_1RvKx8BFbQoDa6p0PaVih8U5'
   ],
-  POLYGLOT_STEAM: [
+  POLYGLOT: [
     'plink_1RoLRRBFbQoDa6p0g9zXIJaM',
     'plink_1Rzg0NBFbQoDa6p0fL5aVAsU',
-    'plink_1RvL4VBFbQoDa6p09A00tNAR'
-  ],
-  POLYGLOT_ITCH: [
+    'plink_1RvL4VBFbQoDa6p09A00tNAR',
     'plink_1RoNLzBFbQoDa6p0lvW7lw5f',
     'plink_1RoN4QBFbQoDa6p0fQ8Xc3Vs',
     'plink_1S2w5eBFbQoDa6p06bwPV6Hp',
@@ -75,6 +87,12 @@ const PRODUCT = {
   POLY_ITCH: 'POLY_ITCH',
   ZH_PREORDER: 'MandarinPreorder',
   EN_PREORDER: 'EnglishPreorder'
+};
+
+// Play mode
+const PLAY_MODE = {
+  STEAM: 'STEAM',
+  DIRECT: 'DIRECT' // "Direct Download" (mapped to the Itch product)
 };
 
 // Helper to normalize language strings
@@ -216,13 +234,104 @@ function getLanguageProductFromCustomFields(session) {
   }
 
   console.log('lang from custom_fields', {
-    keys: cfs.map(f => f.key),
+    keys: cfs.map((f) => f.key),
     chosenKey: chosen && chosen.field ? chosen.field.key : null,
     rawValue: chosen ? chosen.rawValue : null,
     product: chosen ? chosen.product : null
   });
 
   return chosen ? chosen.product : null;
+}
+
+// --- Play mode helpers ("Steam Key" vs "Direct Download")
+
+function parsePlayMode(raw) {
+  const key = normalizeLangString(raw);
+  if (!key) return null;
+  if (key.includes('steam')) return PLAY_MODE.STEAM;
+  if (key.includes('direct')) return PLAY_MODE.DIRECT;
+  if (key.includes('itch')) return PLAY_MODE.DIRECT; // safety, in case label mentions Itch
+  return null;
+}
+
+function extractPlayModeFromField(f) {
+  if (!f) return null;
+  const candidates = [];
+
+  if (f.text && typeof f.text.value !== 'undefined' && f.text.value !== null) {
+    candidates.push(f.text.value);
+  }
+
+  if (f.dropdown) {
+    if (typeof f.dropdown.value !== 'undefined' && f.dropdown.value !== null) {
+      candidates.push(f.dropdown.value);
+    }
+    if (Array.isArray(f.dropdown.options)) {
+      for (const opt of f.dropdown.options) {
+        if (typeof opt.value !== 'undefined' && opt.value !== null) {
+          candidates.push(opt.value);
+        }
+        if (typeof opt.label !== 'undefined' && opt.label !== null) {
+          candidates.push(opt.label);
+        }
+      }
+    }
+  }
+
+  if (typeof f.value !== 'undefined' && f.value !== null) {
+    candidates.push(f.value);
+  }
+
+  for (const c of candidates) {
+    const pm = parsePlayMode(c);
+    if (pm) return { playMode: pm, rawValue: c };
+  }
+  return null;
+}
+
+function getPlayModeFromCustomFields(session) {
+  const cfs = Array.isArray(session.custom_fields) ? session.custom_fields : [];
+  if (!cfs.length) {
+    console.log('playMode: no custom_fields on session');
+    return null;
+  }
+
+  const normalizeKey = (s) =>
+    String(s || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+  const configuredKeyNorm = normalizeKey(PLAY_MODE_FIELD_KEY || 'play_mode');
+
+  let chosen = null;
+
+  // 1) Prefer the configured key if we find a matching field
+  for (const f of cfs) {
+    if (normalizeKey(f.key) === configuredKeyNorm) {
+      const got = extractPlayModeFromField(f);
+      if (got) {
+        chosen = { field: f, ...got };
+        break;
+      }
+    }
+  }
+
+  // 2) Fallback: try all fields in order for something that looks like a play mode
+  if (!chosen) {
+    for (const f of cfs) {
+      const got = extractPlayModeFromField(f);
+      if (got) {
+        chosen = { field: f, ...got };
+        break;
+      }
+    }
+  }
+
+  console.log('playMode from custom_fields', {
+    keys: cfs.map((f) => f.key),
+    chosenKey: chosen && chosen.field ? chosen.field.key : null,
+    rawValue: chosen ? chosen.rawValue : null,
+    playMode: chosen ? chosen.playMode : null
+  });
+
+  return chosen ? chosen.playMode : null;
 }
 
 // --- Google Sheets client
@@ -289,7 +398,10 @@ async function findAndAssignKey({ sheetTab, email, sessionId, paymentLinkId }) {
     const existingSession = rows[i][3];
     if (existingSession === sessionId) {
       const k = rows[i][0];
-      console.log('sheets: already assigned; returning existing key', { row: i + 2, key: k });
+      console.log('sheets: already assigned; returning existing key', {
+        row: i + 2,
+        key: k
+      });
       return { key: k };
     }
   }
@@ -329,13 +441,23 @@ async function findAndAssignKey({ sheetTab, email, sessionId, paymentLinkId }) {
 // --- MailerLite helpers
 function envList(name) {
   const v = process.env[name];
-  return v ? v.split(',').map(s => s.trim()).filter(Boolean) : [];
+  return v ? v.split(',').map((s) => s.trim()).filter(Boolean) : [];
 }
 
-function groupsForProduct(product) {
+function groupsForProduct(product, playMode) {
   const common = envList('ML_GROUPS_ALL');
+  const steamGroups = envList('ML_GROUPS_POLY_STEAM');
+  const directGroups = envList('ML_GROUPS_POLY_ITCH');
 
-  // If you want language specific groups, you can wire ML_GROUPS_FR etc here
+  // Prefer play mode based grouping if known
+  if (playMode === PLAY_MODE.STEAM) {
+    return common.concat(steamGroups);
+  }
+  if (playMode === PLAY_MODE.DIRECT) {
+    return common.concat(directGroups);
+  }
+
+  // Fallback to product based mapping
   switch (product) {
     case PRODUCT.FR:
     case PRODUCT.ES:
@@ -345,32 +467,40 @@ function groupsForProduct(product) {
     case PRODUCT.KO:
     case PRODUCT.JA:
     case PRODUCT.POLY_STEAM:
-      return common.concat(envList('ML_GROUPS_POLY_STEAM'));
+      return common.concat(steamGroups);
     case PRODUCT.POLY_ITCH:
-      return common.concat(envList('ML_GROUPS_POLY_ITCH'));
+      return common.concat(directGroups);
     default:
       return common;
   }
 }
 
-async function upsertMailerLite({ email, product, key }) {
+async function upsertMailerLite({ email, product, key, playMode }) {
   const api = 'https://connect.mailerlite.com/api';
-  const groups = groupsForProduct(product);
+  const groups = groupsForProduct(product, playMode);
   const steamKeyField = ML_FIELD_STEAM_KEY || 'steam_key';
   const itchKeyField = ML_FIELD_ITCH_KEY || 'itch_key';
   const fields = {};
-  if (product === PRODUCT.POLY_ITCH) fields[itchKeyField] = key;
-  else fields[steamKeyField] = key;
+
+  if (key) {
+    if (playMode === PLAY_MODE.DIRECT) {
+      // Direct Download → Itch key field
+      fields[itchKeyField] = key;
+    } else {
+      // Steam mode (default)
+      fields[steamKeyField] = key;
+    }
+  }
 
   const payload = { email, fields, groups };
-  console.log('ml: upsert', { email, product, groups, fields });
+  console.log('ml: upsert', { email, product, playMode, groups, fields });
 
   const res = await fetch(`${api}/subscribers`, {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${MAILERLITE_API_KEY}`,
+      Authorization: `Bearer ${MAILERLITE_API_KEY}`,
       'Content-Type': 'application/json',
-      'Accept': 'application/json'
+      Accept: 'application/json'
     },
     body: JSON.stringify(payload)
   });
@@ -390,11 +520,13 @@ async function lookupMailerLiteIp(email) {
   if (!MAILERLITE_API_KEY) return null;
   try {
     const res = await fetch(
-      `https://connect.mailerlite.com/api/subscribers/${encodeURIComponent(email)}`,
+      `https://connect.mailerlite.com/api/subscribers/${encodeURIComponent(
+        email
+      )}`,
       {
         headers: {
-          'Authorization': `Bearer ${MAILERLITE_API_KEY}`,
-          'Accept': 'application/json'
+          Authorization: `Bearer ${MAILERLITE_API_KEY}`,
+          Accept: 'application/json'
         }
       }
     );
@@ -426,9 +558,9 @@ async function notifyBailAdmin({ buyerEmail }) {
       {
         method: 'PATCH',
         headers: {
-          'Authorization': `Bearer ${MAILERLITE_API_KEY}`,
+          Authorization: `Bearer ${MAILERLITE_API_KEY}`,
           'Content-Type': 'application/json',
-          'Accept': 'application/json'
+          Accept: 'application/json'
         },
         body: JSON.stringify(payload)
       }
@@ -444,9 +576,9 @@ async function notifyBailAdmin({ buyerEmail }) {
     const add = await fetch(`${api}/groups/${ML_BAILED_GROUP_ID}/subscribers`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${MAILERLITE_API_KEY}`,
+        Authorization: `Bearer ${MAILERLITE_API_KEY}`,
         'Content-Type': 'application/json',
-        'Accept': 'application/json'
+        Accept: 'application/json'
       },
       body: JSON.stringify({ email: ADMIN_EMAIL_FOR_BAIL })
     });
@@ -463,7 +595,8 @@ async function notifyBailAdmin({ buyerEmail }) {
 
 // --- Meta (Facebook) helpers
 
-const META_ENDPOINT = (pixel) => `https://graph.facebook.com/v20.0/${pixel}/events`;
+const META_ENDPOINT = (pixel) =>
+  `https://graph.facebook.com/v20.0/${pixel}/events`;
 
 function cleanForHash(s) {
   return String(s || '').trim();
@@ -504,9 +637,7 @@ async function sendMetaPurchase({
   const user_data = {
     em: sha256LowerRaw(email),
     ph: phone ? sha256LowerRaw(phone) : undefined,
-    external_id: session.customer
-      ? sha256LowerRaw(session.customer)
-      : undefined,
+    external_id: session.customer ? sha256LowerRaw(session.customer) : undefined,
     client_ip_address: ip || undefined,
     fbp: fbp || undefined,
     fbc: fbc || undefined
@@ -531,7 +662,10 @@ async function sendMetaPurchase({
     custom_data
   };
 
-  const body = { data: [ev], test_event_code: META_TEST_EVENT_CODE || undefined };
+  const body = {
+    data: [ev],
+    test_event_code: META_TEST_EVENT_CODE || undefined
+  };
 
   console.log('meta: sending', {
     event_id: ev.event_id,
@@ -548,7 +682,7 @@ async function sendMetaPurchase({
     )}`,
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify(body)
     }
   );
@@ -708,7 +842,7 @@ async function sendTikTokEvent({
     headers: {
       'Access-Token': TIKTOK_TOKEN,
       'Content-Type': 'application/json',
-      'Accept': 'application/json'
+      Accept: 'application/json'
     },
     body: JSON.stringify(body)
   });
@@ -733,40 +867,68 @@ class BailError extends Error {
   }
 }
 
-// --- Robust product routing using language custom field
+// --- Robust product routing using language + play mode custom fields
 
 async function productFromSession(session) {
   const pl = session.payment_link;
   const langProduct = getLanguageProductFromCustomFields(session);
+  const playMode = getPlayModeFromCustomFields(session);
 
-  // If user explicitly selected any preorder language, that wins.
+  // Preorders are driven by the language field and ignore payment link and play mode
   if (langProduct === PRODUCT.ZH_PREORDER || langProduct === PRODUCT.EN_PREORDER) {
     console.log('route: PREORDER', { payment_link: pl, langProduct });
-    return langProduct;
+    return { product: langProduct, playMode: null };
   }
 
-  // Single language Steam key links must have a language selection.
+  if (!playMode) {
+    // For normal products, play mode is required
+    throw new BailError('Play mode selection missing', null);
+  }
+
+  // Single language checkout:
+  // - If Steam Key: use language specific Steam product (FR, ES, DE, PT, IT, KO, JA).
+  // - If Direct Download: always polyglot Itch, language choice ignored.
   if (inSet(PAYMENT_LINK.SINGLE_LANGUAGE, pl)) {
-    console.log('route: SINGLE_LANGUAGE', { payment_link: pl, langProduct });
-    if (!langProduct) {
-      throw new BailError('Language selection missing for SINGLE_LANGUAGE', null);
+    if (playMode === PLAY_MODE.STEAM) {
+      console.log('route: SINGLE_LANGUAGE + STEAM', { payment_link: pl, langProduct });
+      if (!langProduct) {
+        throw new BailError(
+          'Language selection missing for SINGLE_LANGUAGE Steam',
+          null
+        );
+      }
+      return { product: langProduct, playMode };
+    } else {
+      console.log('route: SINGLE_LANGUAGE + DIRECT => POLY_ITCH', {
+        payment_link: pl
+      });
+      return { product: PRODUCT.POLY_ITCH, playMode };
     }
-    return langProduct;
   }
 
-  // Polyglot links ignore language, except preorders already handled.
-  if (inSet(PAYMENT_LINK.POLYGLOT_STEAM, pl)) {
-    console.log('route: POLYGLOT_STEAM', { payment_link: pl });
-    return PRODUCT.POLY_STEAM;
-  }
-  if (inSet(PAYMENT_LINK.POLYGLOT_ITCH, pl)) {
-    console.log('route: POLYGLOT_ITCH', { payment_link: pl });
-    return PRODUCT.POLY_ITCH;
+  // Polyglot checkout:
+  // - Steam Key: Polyglot Steam.
+  // - Direct Download: Polyglot Itch.
+  if (inSet(PAYMENT_LINK.POLYGLOT, pl)) {
+    if (playMode === PLAY_MODE.STEAM) {
+      console.log('route: POLYGLOT + STEAM', { payment_link: pl });
+      return { product: PRODUCT.POLY_STEAM, playMode };
+    } else {
+      console.log('route: POLYGLOT + DIRECT', { payment_link: pl });
+      return { product: PRODUCT.POLY_ITCH, playMode };
+    }
   }
 
-  // Unknown payment link: fall back to language selection if any, otherwise poly steam.
-  console.log('route: DEFAULT', { payment_link: pl, langProduct });
-  return langProduct || PRODUCT.POLY_STEAM;
+  // Fallback: unknown payment link
+  console.log('route: DEFAULT', { payment_link: pl, langProduct, playMode });
+
+  if (playMode === PLAY_MODE.STEAM) {
+    // Prefer language product if present, otherwise fall back to polyglot steam
+    return { product: langProduct || PRODUCT.POLY_STEAM, playMode };
+  }
+
+  // Direct Download fallback: polyglot Itch
+  return { product: PRODUCT.POLY_ITCH, playMode };
 }
 
 // --- Main handler
@@ -841,16 +1003,16 @@ exports.handler = async (event) => {
   }
 
   try {
-    const product = await productFromSession(session);
+    const { product, playMode } = await productFromSession(session);
     const sheetTab = SHEET_TAB_BY_PRODUCT[product];
-    console.log('routing decision', { product, sheetTab });
+    console.log('routing decision', { product, sheetTab, playMode });
 
     if (!sheetTab) {
       console.warn('warn: unknown product', { product });
       return { statusCode: 200, body: 'Unknown product' };
     }
 
-    // Special case – Mandarin and English pre orders:
+    // Mandarin and English pre orders:
     // just log the order in the language sheet and do not assign keys or touch MailerLite.
     if (product === PRODUCT.ZH_PREORDER || product === PRODUCT.EN_PREORDER) {
       try {
@@ -866,7 +1028,7 @@ exports.handler = async (event) => {
         return { statusCode: 500, body: 'Preorder sheet error' };
       }
     } else {
-      // Normal products: assign a key and sync with MailerLite.
+      // Normal products (Steam or Direct/Itch): assign a key and sync with MailerLite.
       let key;
       try {
         const r = await findAndAssignKey({
@@ -893,7 +1055,7 @@ exports.handler = async (event) => {
 
       // Upsert in MailerLite (best effort).
       try {
-        const okMl = await upsertMailerLite({ email, product, key });
+        const okMl = await upsertMailerLite({ email, product, key, playMode });
         if (!okMl) console.warn('warn: mailerlite upsert not ok');
       } catch (err) {
         console.error('mailerlite error:', err.message);
@@ -942,7 +1104,7 @@ exports.handler = async (event) => {
   } catch (err) {
     // Handle bail with side effects
     if (err instanceof BailError) {
-      console.warn('bailed: single-language language resolution failed');
+      console.warn('bailed: language/play mode resolution failed');
       try {
         await appendBailedEmailToSheet(email);
       } catch {}
@@ -955,7 +1117,7 @@ exports.handler = async (event) => {
     console.error('routing error:', err.message);
     return {
       statusCode: 200,
-      body: 'Language not recognized for single-language link'
+      body: 'Language / play mode not recognized for single-language link'
     };
   }
 };
