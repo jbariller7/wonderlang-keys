@@ -68,8 +68,8 @@ const PAYMENT_LINK = {
   ],
   // These trigger the "Get 2 keys" logic
   BOGO: [
-    'YOUR_NEW_PLINK_ID_1', 
-    'YOUR_NEW_PLINK_ID_2'
+    'plink_1SzYQNBFbQoDa6p0A1WwDTCI', 
+    'plink_1SzYjcBFbQoDa6p08zbQWhKF'
   ],
   POLYGLOT: [
     'plink_1RoLRRBFbQoDa6p0g9zXIJaM',
@@ -81,8 +81,8 @@ const PAYMENT_LINK = {
     'plink_1Rzg7fBFbQoDa6p0UCIOzCtk',
     'plink_1S2wD2BFbQoDa6p0w2tvZNiG',
     // Also add the BOGO links here so they Route correctly as Polyglot products
-    'YOUR_NEW_PLINK_ID_1',
-    'YOUR_NEW_PLINK_ID_2'
+    'plink_1SzYQNBFbQoDa6p0A1WwDTCI',
+    'plink_1SzYjcBFbQoDa6p08zbQWhKF'
   ]
 };
 
@@ -520,7 +520,28 @@ async function upsertMailerLite({ email, product, key, extraKey, playMode }) {
     }
   }
 
-  const payload = { email, fields, groups };
+const payload = { email, fields, groups };
+  console.log('ml: upsert', { email, product, playMode, groups, fields });
+
+  const res = await fetch(`${api}/subscribers`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${MAILERLITE_API_KEY}`,
+      'Content-Type': 'application/json',
+      Accept: 'application/json'
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const text = await res.text().catch(() => '');
+  console.log('ml: response', {
+    status: res.status,
+    ok: res.ok,
+    len: text.length,
+    preview: text.slice(0, 120)
+  });
+  return res.ok;
+}
 
 // Optional: try to fetch subscriber and reuse their IP
 async function lookupMailerLiteIp(email) {
@@ -1035,7 +1056,7 @@ exports.handler = async (event) => {
         return { statusCode: 500, body: 'Preorder sheet error' };
       }
     } else {
-    
+      // Normal products (Steam or Direct/Itch): assign a key and sync with MailerLite.
 // Normal products (Steam or Direct/Itch): assign a key (or two) and sync with MailerLite.
       let key;
       let extraKey = null;
