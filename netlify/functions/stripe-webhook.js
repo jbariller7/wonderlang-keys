@@ -27,6 +27,9 @@ const {
   ML_GROUPS_JA,
   ML_GROUPS_POLY_STEAM,
   ML_GROUPS_POLY_ITCH,
+// MailerLite Extra Fields (BOGO)
+  ML_FIELD_EXTRA_STEAM_KEY,
+  ML_FIELD_EXTRA_ITCH_KEY,
 
   // TikTok
   TIKTOK_API_KEY,
@@ -58,21 +61,29 @@ const ML_BAILED_GROUP_ID = '158395915765286796';
 // POLYGLOT: any "polyglot" offer.
 // All links here are routed using the play mode custom field.
 const PAYMENT_LINK = {
-  SINGLE_LANGUAGE: [
-    'plink_1RoKYZBFbQoDa6p0hCPS3d2g',
-    'plink_1Rzg6lBFbQoDa6p0bmGphygN',
-    'plink_1RvKx8BFbQoDa6p0PaVih8U5'
-  ],
-  POLYGLOT: [
-    'plink_1RoLRRBFbQoDa6p0g9zXIJaM',
-    'plink_1Rzg0NBFbQoDa6p0fL5aVAsU',
-    'plink_1RvL4VBFbQoDa6p09A00tNAR',
-    'plink_1RoNLzBFbQoDa6p0lvW7lw5f',
-    'plink_1RoN4QBFbQoDa6p0fQ8Xc3Vs',
-    'plink_1S2w5eBFbQoDa6p06bwPV6Hp',
-    'plink_1Rzg7fBFbQoDa6p0UCIOzCtk',
-    'plink_1S2wD2BFbQoDa6p0w2tvZNiG'
-  ]
+  SINGLE_LANGUAGE: [
+    'plink_1RoKYZBFbQoDa6p0hCPS3d2g',
+    'plink_1Rzg6lBFbQoDa6p0bmGphygN',
+    'plink_1RvKx8BFbQoDa6p0PaVih8U5'
+  ],
+  // These trigger the "Get 2 keys" logic
+  BOGO: [
+    'YOUR_NEW_PLINK_ID_1', 
+    'YOUR_NEW_PLINK_ID_2'
+  ],
+  POLYGLOT: [
+    'plink_1RoLRRBFbQoDa6p0g9zXIJaM',
+    'plink_1Rzg0NBFbQoDa6p0fL5aVAsU',
+    'plink_1RvL4VBFbQoDa6p09A00tNAR',
+    'plink_1RoNLzBFbQoDa6p0lvW7lw5f',
+    'plink_1RoN4QBFbQoDa6p0fQ8Xc3Vs',
+    'plink_1S2w5eBFbQoDa6p06bwPV6Hp',
+    'plink_1Rzg7fBFbQoDa6p0UCIOzCtk',
+    'plink_1S2wD2BFbQoDa6p0w2tvZNiG',
+    // Also add the BOGO links here so they Route correctly as Polyglot products
+    'YOUR_NEW_PLINK_ID_1',
+    'YOUR_NEW_PLINK_ID_2'
+  ]
 };
 
 // --- Product codes
@@ -83,13 +94,12 @@ const PRODUCT = {
   PT: 'Portuguese',
   IT: 'Italian',
   KO: 'Korean',
-  JA: 'Japanese',
-  POLY_STEAM: 'POLY_STEAM',
-  POLY_ITCH: 'POLY_ITCH',
-  ZH_PREORDER: 'MandarinPreorder',
-  EN_PREORDER: 'EnglishPreorder'
+JA: 'Japanese',
+  POLY_STEAM: 'POLY_STEAM',
+  POLY_ITCH: 'POLY_ITCH',
+  ZH: 'Mandarin',
+  EN_PREORDER: 'EnglishPreorder'
 };
-
 // Play mode
 const PLAY_MODE = {
   STEAM: 'STEAM',
@@ -113,7 +123,7 @@ const LANGUAGE_VALUE_TO_PRODUCT = {
   [normalizeLangString('Portuguese')]: PRODUCT.PT,
   [normalizeLangString('Korean')]: PRODUCT.KO,
   [normalizeLangString('Japanese')]: PRODUCT.JA,
-  [normalizeLangString('Mandarin Chinese (Pre-Order)')]: PRODUCT.ZH_PREORDER,
+  [normalizeLangString('Mandarin Chinese')]: PRODUCT.ZH,
   [normalizeLangString('English (Pre-Order)')]: PRODUCT.EN_PREORDER
 };
 
@@ -127,7 +137,7 @@ const SHEET_TAB_BY_PRODUCT = {
   [PRODUCT.JA]: 'Japanese Steam',
   [PRODUCT.POLY_STEAM]: 'Polyglot Steam',
   [PRODUCT.POLY_ITCH]: 'Polyglot Itch',
-  [PRODUCT.ZH_PREORDER]: 'Mandarin',
+  [PRODUCT.ZH]: 'Mandarin Steam',
   [PRODUCT.EN_PREORDER]: 'English'
 };
 
@@ -152,8 +162,8 @@ function productFromLanguageValue(value) {
   if (key.includes('portuguese')) return PRODUCT.PT;
   if (key.includes('korean')) return PRODUCT.KO;
   if (key.includes('japanese')) return PRODUCT.JA;
-  if (key.includes('mandarin') || key.includes('chinese')) return PRODUCT.ZH_PREORDER;
-  if (key.includes('english') && key.includes('pre-order')) return PRODUCT.EN_PREORDER;
+  if (key.includes('mandarin') || key.includes('chinese')) return PRODUCT.ZH;
+  if (key.includes('english') ) return PRODUCT.EN_PREORDER;
 
   return null;
 }
@@ -465,10 +475,12 @@ function groupsForProduct(product, playMode) {
     case PRODUCT.DE:
     case PRODUCT.PT:
     case PRODUCT.IT:
-    case PRODUCT.KO:
-    case PRODUCT.JA:
-    case PRODUCT.POLY_STEAM:
-      return common.concat(steamGroups);
+    case PRODUCT.KO:
+    case PRODUCT.JA:
+    case PRODUCT.ZH:
+    case PRODUCT.POLY_STEAM:
+      return common.concat(steamGroups);
+   
     case PRODUCT.POLY_ITCH:
       return common.concat(directGroups);
     default:
@@ -476,45 +488,39 @@ function groupsForProduct(product, playMode) {
   }
 }
 
-async function upsertMailerLite({ email, product, key, playMode }) {
-  const api = 'https://connect.mailerlite.com/api';
-  const groups = groupsForProduct(product, playMode);
-  const steamKeyField = ML_FIELD_STEAM_KEY || 'steam_key';
-  const itchKeyField = ML_FIELD_ITCH_KEY || 'itch_key';
-  const fields = {};
+async function upsertMailerLite({ email, product, key, extraKey, playMode }) {
+  const api = 'https://connect.mailerlite.com/api';
+  const groups = groupsForProduct(product, playMode);
+  
+  // Standard fields
+  const steamKeyField = ML_FIELD_STEAM_KEY || 'steam_key';
+  const itchKeyField = ML_FIELD_ITCH_KEY || 'itch_key';
+  
+  // Extra (BOGO) fields
+  const extraSteamField = ML_FIELD_EXTRA_STEAM_KEY || 'extra_steam_key';
+  const extraItchField = ML_FIELD_EXTRA_ITCH_KEY || 'extra_itch_link';
 
-  if (key) {
-    if (playMode === PLAY_MODE.DIRECT) {
-      // Direct Download → Itch key field
-      fields[itchKeyField] = key;
-    } else {
-      // Steam mode (default)
-      fields[steamKeyField] = key;
-    }
-  }
+  const fields = {};
 
-  const payload = { email, fields, groups };
-  console.log('ml: upsert', { email, product, playMode, groups, fields });
+  // 1. Assign Primary Key
+  if (key) {
+    if (playMode === PLAY_MODE.DIRECT) {
+      fields[itchKeyField] = key;
+    } else {
+      fields[steamKeyField] = key;
+    }
+  }
 
-  const res = await fetch(`${api}/subscribers`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${MAILERLITE_API_KEY}`,
-      'Content-Type': 'application/json',
-      Accept: 'application/json'
-    },
-    body: JSON.stringify(payload)
-  });
+  // 2. Assign Extra BOGO Key (if present)
+  if (extraKey) {
+    if (playMode === PLAY_MODE.DIRECT) {
+      fields[extraItchField] = extraKey;
+    } else {
+      fields[extraSteamField] = extraKey;
+    }
+  }
 
-  const text = await res.text().catch(() => '');
-  console.log('ml: response', {
-    status: res.status,
-    ok: res.ok,
-    len: text.length,
-    preview: text.slice(0, 120)
-  });
-  return res.ok;
-}
+  const payload = { email, fields, groups };
 
 // Optional: try to fetch subscriber and reuse their IP
 async function lookupMailerLiteIp(email) {
@@ -876,7 +882,7 @@ async function productFromSession(session) {
   const playMode = getPlayModeFromCustomFields(session);
 
   // Preorders are driven by the language field and ignore payment link and play mode
-  if (langProduct === PRODUCT.ZH_PREORDER || langProduct === PRODUCT.EN_PREORDER) {
+ if (langProduct === PRODUCT.EN_PREORDER) {
     console.log('route: PREORDER', { payment_link: pl, langProduct });
     return { product: langProduct, playMode: null };
   }
@@ -1015,7 +1021,7 @@ exports.handler = async (event) => {
 
     // Mandarin and English pre orders:
     // just log the order in the language sheet and do not assign keys or touch MailerLite.
-    if (product === PRODUCT.ZH_PREORDER || product === PRODUCT.EN_PREORDER) {
+   if (product === PRODUCT.EN_PREORDER) {
       try {
         await appendPreorderToSheet({
           sheetTab,
@@ -1029,38 +1035,59 @@ exports.handler = async (event) => {
         return { statusCode: 500, body: 'Preorder sheet error' };
       }
     } else {
-      // Normal products (Steam or Direct/Itch): assign a key and sync with MailerLite.
-      let key;
-      try {
-        const r = await findAndAssignKey({
-          sheetTab,
-          email,
-          sessionId: session.id,
-          paymentLinkId: session.payment_link || ''
-        });
-        key = r.key;
-      } catch (err) {
-        console.error('sheets error:', err.message);
-        return { statusCode: 500, body: 'Sheets error' };
-      }
+    
+// Normal products (Steam or Direct/Itch): assign a key (or two) and sync with MailerLite.
+      let key;
+      let extraKey = null;
 
-      if (!key) {
-        console.warn('warn: no keys available for', { sheetTab });
-        return { statusCode: 200, body: 'No keys available' };
-      }
-      console.log('ok: got key', {
-        product,
-        sheetTab,
-        keyPreview: String(key).slice(0, 4) + '...'
-      });
+      try {
+        // 1. Fetch First Key
+        const r1 = await findAndAssignKey({
+          sheetTab,
+          email,
+          sessionId: session.id,
+          paymentLinkId: session.payment_link || ''
+        });
+        key = r1.key;
 
-      // Upsert in MailerLite (best effort).
-      try {
-        const okMl = await upsertMailerLite({ email, product, key, playMode });
-        if (!okMl) console.warn('warn: mailerlite upsert not ok');
-      } catch (err) {
-        console.error('mailerlite error:', err.message);
-      }
+        // 2. Check for BOGO and Fetch Second Key
+        if (key && inSet(PAYMENT_LINK.BOGO, session.payment_link)) {
+          console.log('bogo: fetching extra key...');
+          const r2 = await findAndAssignKey({
+            sheetTab,
+            email,
+            // We append _BOGO to the session ID so the sheet treats it as a new row
+            sessionId: session.id + '_BOGO', 
+            paymentLinkId: session.payment_link || ''
+          });
+          extraKey = r2.key;
+          console.log('bogo: got extra key', { keyPreview: String(extraKey).slice(0, 4) + '...' });
+        }
+
+      } catch (err) {
+        console.error('sheets error:', err.message);
+        return { statusCode: 500, body: 'Sheets error' };
+      }
+
+      if (!key) {
+        console.warn('warn: no keys available for', { sheetTab });
+        return { statusCode: 200, body: 'No keys available' };
+      }
+      
+      console.log('ok: got key', {
+        product,
+        sheetTab,
+        keyPreview: String(key).slice(0, 4) + '...',
+        hasExtra: !!extraKey
+      });
+
+      // Upsert in MailerLite (best effort).
+      try {
+        const okMl = await upsertMailerLite({ email, product, key, extraKey, playMode });
+        if (!okMl) console.warn('warn: mailerlite upsert not ok');
+      } catch (err) {
+        console.error('mailerlite error:', err.message);
+      }
     }
 
     // TikTok + Meta (best effort) for all products, including pre orders.
