@@ -82,7 +82,9 @@ const PAYMENT_LINK = {
     'plink_1S2wD2BFbQoDa6p0w2tvZNiG',
     // Also add the BOGO links here so they Route correctly as Polyglot products
     'plink_1SzYQNBFbQoDa6p0A1WwDTCI',
-    'plink_1SzYjcBFbQoDa6p08zbQWhKF'
+    'plink_1SzYjcBFbQoDa6p08zbQWhKF',
+    'plink_1T8M50BFbQoDa6p0UWptUJKq',
+    'plink_1T8MBhBFbQoDa6p0y9whMizD'
   ]
 };
 
@@ -1170,3 +1172,4 @@ exports.handler = async (event) => {
     };
   }
 };
+
