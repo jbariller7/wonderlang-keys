@@ -102,7 +102,7 @@ JA: 'Japanese',
   POLY_STEAM: 'POLY_STEAM',
   POLY_ITCH: 'POLY_ITCH',
   ZH: 'Mandarin',
-  EN_PREORDER: 'EnglishPreorder'
+  EN: 'English'
 };
 // Play mode
 const PLAY_MODE = {
@@ -128,7 +128,7 @@ const LANGUAGE_VALUE_TO_PRODUCT = {
   [normalizeLangString('Korean')]: PRODUCT.KO,
   [normalizeLangString('Japanese')]: PRODUCT.JA,
   [normalizeLangString('Mandarin Chinese')]: PRODUCT.ZH,
-  [normalizeLangString('English (Pre-Order)')]: PRODUCT.EN_PREORDER
+ [normalizeLangString('English')]: PRODUCT.EN
 };
 
 const SHEET_TAB_BY_PRODUCT = {
@@ -142,7 +142,7 @@ const SHEET_TAB_BY_PRODUCT = {
   [PRODUCT.POLY_STEAM]: 'Polyglot Steam',
   [PRODUCT.POLY_ITCH]: 'Polyglot Itch',
   [PRODUCT.ZH]: 'Mandarin Steam',
-  [PRODUCT.EN_PREORDER]: 'English'
+  [PRODUCT.EN]: 'English Steam'
 };
 
 const inSet = (arr, id) => Array.isArray(arr) && arr.includes(id);
@@ -167,9 +167,9 @@ function productFromLanguageValue(value) {
   if (key.includes('korean')) return PRODUCT.KO;
   if (key.includes('japanese')) return PRODUCT.JA;
   if (key.includes('mandarin') || key.includes('chinese')) return PRODUCT.ZH;
-  if (key.includes('english') ) return PRODUCT.EN_PREORDER;
+  if (key.includes('english') ) return PRODUCT.EN;
 
-  return null;
+  return null;
 }
 
 function extractLanguageFromField(f) {
@@ -482,6 +482,7 @@ function groupsForProduct(product, playMode) {
     case PRODUCT.KO:
     case PRODUCT.JA:
     case PRODUCT.ZH:
+    case PRODUCT.EN:
     case PRODUCT.POLY_STEAM:
       return common.concat(steamGroups);
    
@@ -907,10 +908,10 @@ async function productFromSession(session) {
   const playMode = getPlayModeFromCustomFields(session);
 
   // Preorders are driven by the language field and ignore payment link and play mode
- if (langProduct === PRODUCT.EN_PREORDER) {
+/* if (langProduct === PRODUCT.EN_PREORDER) {
     console.log('route: PREORDER', { payment_link: pl, langProduct });
     return { product: langProduct, playMode: null };
-  }
+  } */
 
   if (!playMode) {
     // For normal products, play mode is required
@@ -1044,9 +1045,9 @@ exports.handler = async (event) => {
       return { statusCode: 200, body: 'Unknown product' };
     }
 
-    // Mandarin and English pre orders:
+    // Mandarin and English pre orders have been graduated to normal lanaguages after released. The pre-order code is commented and kept for later use
     // just log the order in the language sheet and do not assign keys or touch MailerLite.
-   if (product === PRODUCT.EN_PREORDER) {
+ /*  if (product === PRODUCT.EN_PREORDER) {
       try {
         await appendPreorderToSheet({
           sheetTab,
@@ -1059,7 +1060,7 @@ exports.handler = async (event) => {
         console.error('preorder sheet error:', err.message);
         return { statusCode: 500, body: 'Preorder sheet error' };
       }
-    } else {
+    } else { */
       // Normal products (Steam or Direct/Itch): assign a key and sync with MailerLite.
 // Normal products (Steam or Direct/Itch): assign a key (or two) and sync with MailerLite.
       let key;
@@ -1113,7 +1114,7 @@ exports.handler = async (event) => {
       } catch (err) {
         console.error('mailerlite error:', err.message);
       }
-    }
+    
 
     // TikTok + Meta (best effort) for all products, including pre orders.
     try {
