@@ -3,6 +3,7 @@
 const Stripe = require('stripe');
 const { google } = require('googleapis');
 const crypto = require('crypto');
+const { websiteRoute } = require('./lib/website-route.cjs');
 
 // --- ENV
 const {
@@ -903,6 +904,8 @@ class BailError extends Error {
 // --- Robust product routing using language + play mode custom fields
 
 async function productFromSession(session) {
+  const website = websiteRoute(session);
+  if (website && !website.mobileOnly) return website;
   const pl = session.payment_link;
   const langProduct = getLanguageProductFromCustomFields(session);
   const playMode = getPlayModeFromCustomFields(session);
@@ -1005,6 +1008,21 @@ exports.handler = async (event) => {
 
   console.log('ok: event verified', { id: stripeEvent.id, type: stripeEvent.type });
 
+  // Preserve the original signed bytes. The entitlement service independently
+  // verifies the Stripe signature and processes only website-session-v1 sales.
+  const websiteCheckout = stripeEvent.data.object.metadata?.wl_checkout_flow === 'website-session-v1';
+  const websiteLifecycle = ['invoice.paid','invoice.payment_failed','customer.subscription.created','customer.subscription.updated','customer.subscription.deleted','customer.subscription.paused','customer.subscription.resumed','charge.refunded','charge.dispute.created'].includes(stripeEvent.type);
+  if (websiteCheckout || websiteLifecycle) {
+    try {
+      const response = await fetch('https://wl-purchase-entitlement.netlify.app/.netlify/functions/website-stripe-webhook', {
+        method:'POST',headers:{'Content-Type':'application/json','stripe-signature':sig},
+        body:event.isBase64Encoded?Buffer.from(event.body,'base64').toString('utf8'):event.body,
+        signal:AbortSignal.timeout(20000)
+      });
+      if (!response.ok) return {statusCode:500,body:'Website entitlement processing should retry'};
+    } catch {return {statusCode:500,body:'Website entitlement processing should retry'};}
+  }
+
   if (
     stripeEvent.type !== 'checkout.session.completed' &&
     stripeEvent.type !== 'checkout.session.async_payment_succeeded'
@@ -1014,6 +1032,12 @@ exports.handler = async (event) => {
   }
 
   const session = stripeEvent.data.object;
+  // Mobile-only website orders never allocate a Steam/Itch key. Their access
+  // is recorded by the entitlement service's separate signed webhook.
+  if (session.metadata?.wl_checkout_flow === 'website-session-v1' &&
+      ['mobile_monthly','mobile_permanent'].includes(session.metadata.wl_website_offer)) {
+    return {statusCode:200,body:'Website mobile access handled by entitlement service'};
+  }
   console.log('session info', {
     id: session.id,
     payment_status: session.payment_status,
