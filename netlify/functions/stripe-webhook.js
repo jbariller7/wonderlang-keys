@@ -643,6 +643,15 @@ function sha256LowerRaw(s) {
     .digest('hex');
 }
 
+function conversionMajorAmount(amount, currency) {
+  if (!Number.isSafeInteger(amount) || amount < 0) throw new Error('Invalid purchase amount');
+  const code=String(currency || '').toUpperCase();
+  if(!/^[A-Z]{3}$/.test(code))throw new Error('Missing purchase currency');
+  const zero=new Set(['BIF','CLP','DJF','GNF','JPY','KMF','KRW','MGA','PYG','RWF','UGX','VND','VUV','XAF','XOF','XPF']);
+  const divisor=zero.has(code)?1:['BHD','JOD','KWD','OMR','TND'].includes(code)?1000:100;
+  return amount/divisor;
+}
+
 async function sendMetaPurchase({
   session,
   email,
@@ -659,11 +668,11 @@ async function sendMetaPurchase({
     return false;
   }
   const sessionTotal =
-    typeof session.amount_total === 'number' ? session.amount_total / 100 : null;
+    typeof session.amount_total === 'number' ? conversionMajorAmount(session.amount_total, session.currency) : null;
   const { unitPrice, currency: liCurrency, name: liName } = await getLineItemInfo(
     session.id
   );
-  const value = sessionTotal ?? unitPrice ?? 15;
+  const value = sessionTotal ?? unitPrice;
   const currency = (session.currency || liCurrency || 'USD').toUpperCase();
   const price = unitPrice ?? value;
   const contentNameFinal = contentName || liName || product;
@@ -698,7 +707,7 @@ async function sendMetaPurchase({
 
   const body = {
     data: [ev],
-    test_event_code: META_TEST_EVENT_CODE || undefined
+    test_event_code: session.livemode === false ? META_TEST_EVENT_CODE || undefined : undefined
   };
 
   console.log('meta: sending', {
@@ -743,9 +752,9 @@ async function getLineItemInfo(sessionId) {
     if (!item) return {};
     const unitPrice =
       typeof item.amount_total === 'number'
-        ? item.amount_total / 100
+        ? conversionMajorAmount(item.amount_total, item.currency || item.price?.currency)
         : item.price?.unit_amount
-        ? item.price.unit_amount / 100
+        ? conversionMajorAmount(item.price.unit_amount, item.price.currency)
         : null;
     const currency = (item.currency || '').toUpperCase() || null;
     const name = item.description || item.price?.product?.name || null;
@@ -811,11 +820,11 @@ async function sendTikTokEvent({
   }
 
   const sessionTotal =
-    typeof session.amount_total === 'number' ? session.amount_total / 100 : null;
+    typeof session.amount_total === 'number' ? conversionMajorAmount(session.amount_total, session.currency) : null;
   const { unitPrice, currency: liCurrency, name: liName } = await getLineItemInfo(
     session.id
   );
-  const value = sessionTotal ?? unitPrice ?? 15;
+  const value = sessionTotal ?? unitPrice;
   const currency = (session.currency || liCurrency || 'USD').toUpperCase();
   const price = unitPrice ?? value;
   const contentNameFinal = contentName || liName || product;
@@ -1140,44 +1149,26 @@ exports.handler = async (event) => {
       }
     
 
-    // TikTok + Meta (best effort) for all products, including pre orders.
-    try {
-      const ip = await lookupMailerLiteIp(email); // may be null
-      const url = await getPaymentLinkUrl(session.payment_link);
-      const phone = await getCustomerPhone(session);
-      const ttclid = session?.metadata?.ttclid || null;
-      const ttp = session?.metadata?.ttp || null;
+    // Send each platform independently. A failure in one must not skip the other.
+    // Never report Stripe test purchases to production pixels.
+    if (session.livemode === true) {
+      const [ipResult, urlResult, phoneResult] = await Promise.allSettled([
+        lookupMailerLiteIp(email), getPaymentLinkUrl(session.payment_link), getCustomerPhone(session)
+      ]);
+      const value = result => result.status === 'fulfilled' ? result.value : null;
+      const common = {session,email,product,ip:value(ipResult),
+        url:value(urlResult) || 'https://wonderlang.net/shop/',phone:value(phoneResult),contentName:sheetTab};
+      const results = await Promise.allSettled([
+        sendTikTokEvent({...common,ttclid:session.metadata?.ttclid,ttp:session.metadata?.ttp}),
+        sendMetaPurchase({...common,fbc:session.metadata?.fbc,fbp:session.metadata?.fbp})
+      ]);
+      results.forEach((result,index)=>{
+        if(result.status === 'rejected' || result.value === false)
+          console.error(index === 0 ? 'TikTok conversion delivery failed' : 'Meta conversion delivery failed');
+      });
+    }
 
-      await sendTikTokEvent({
-        session,
-        email,
-        product,
-        ip,
-        url,
-        phone,
-        ttclid,
-        ttp,
-        contentName: sheetTab
-      });
-
-      const fbc = session?.metadata?.fbc || null;
-      const fbp = session?.metadata?.fbp || null;
-      await sendMetaPurchase({
-        session,
-        email,
-        product,
-        ip,
-        url,
-        phone,
-        fbc,
-        fbp,
-        contentName: sheetTab
-      });
-    } catch (err) {
-      console.error('tiktok/meta error:', err.message);
-    }
-
-    console.log('ok: fulfillment complete');
+    console.log('ok: fulfillment complete');
     return { statusCode: 200, body: 'OK' };
   } catch (err) {
     // Handle bail with side effects
