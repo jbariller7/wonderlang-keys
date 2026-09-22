@@ -1151,7 +1151,7 @@ exports.handler = async (event) => {
 
     // Send each platform independently. A failure in one must not skip the other.
     // Never report Stripe test purchases to production pixels.
-    if (session.livemode === true) {
+    if (session.livemode === true && session.metadata?.wl_ads_owner !== 'entitlement-v2') {
       const [ipResult, urlResult, phoneResult] = await Promise.allSettled([
         lookupMailerLiteIp(email), getPaymentLinkUrl(session.payment_link), getCustomerPhone(session)
       ]);
