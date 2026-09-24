@@ -1140,8 +1140,9 @@ exports.handler = async (event) => {
         hasExtra: !!extraKey
       });
 
-      // Upsert in MailerLite (best effort).
-      try {
+      // New Workspace-owned confirmations read this same assigned key from the
+      // Sheet. Do not also trigger the old MailerLite delivery automation.
+      if (session.metadata?.wl_email_owner !== 'workspace-v1') try {
         const okMl = await upsertMailerLite({ email, product, key, extraKey, playMode });
         if (!okMl) console.warn('warn: mailerlite upsert not ok');
       } catch (err) {
