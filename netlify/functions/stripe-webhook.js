@@ -1017,11 +1017,10 @@ exports.handler = async (event) => {
 
   console.log('ok: event verified', { id: stripeEvent.id, type: stripeEvent.type });
 
-  // Preserve the original signed bytes. The entitlement service independently
-  // verifies the Stripe signature and processes only website-session-v1 sales.
-  const websiteCheckout = stripeEvent.data.object.metadata?.wl_checkout_flow === 'website-session-v1';
-  const websiteLifecycle = ['invoice.paid','invoice.payment_failed','customer.subscription.created','customer.subscription.updated','customer.subscription.deleted','customer.subscription.paused','customer.subscription.resumed','charge.refunded','charge.dispute.created'].includes(stripeEvent.type);
-  if (websiteCheckout || websiteLifecycle) {
+  // Preserve the signed bytes for independent verification at the receiver.
+  const {forwardingPolicy}=require('./lib/forwarding-policy.cjs');
+  const routing=forwardingPolicy(stripeEvent);
+  if (routing.forward) {
     try {
       const response = await fetch('https://wl-purchase-entitlement.netlify.app/.netlify/functions/website-stripe-webhook', {
         method:'POST',headers:{'Content-Type':'application/json','stripe-signature':sig},
@@ -1031,6 +1030,7 @@ exports.handler = async (event) => {
       if (!response.ok) return {statusCode:500,body:'Website entitlement processing should retry'};
     } catch {return {statusCode:500,body:'Website entitlement processing should retry'};}
   }
+  if(routing.stopBeforeFulfillment)return {statusCode:200,body:'VIP reservation handled separately; no game fulfillment'};
 
   if (
     stripeEvent.type !== 'checkout.session.completed' &&
